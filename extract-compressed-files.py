@@ -71,6 +71,7 @@ client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 MAX_ARCHIVE_GB = config.getfloat('DEFAULT', 'MAX_ARCHIVE_GB', fallback=6.0)  # Skip if bigger than this
 DISK_SPACE_FACTOR = config.getfloat('DEFAULT', 'DISK_SPACE_FACTOR', fallback=2.5)  # Need free >= factor * archive size
 MAX_CONCURRENT = config.getint('DEFAULT', 'MAX_CONCURRENT', fallback=1)  # semaphore size
+DOWNLOAD_CHUNK_SIZE_KB = config.getint('DEFAULT', 'DOWNLOAD_CHUNK_SIZE_KB', fallback=512) # Affects download speed
 
 # Cache file path
 PROCESSED_CACHE_PATH = os.path.join(DATA_DIR, 'processed_archives.json')
@@ -252,8 +253,16 @@ async def process_archive_event(event):
                 last_report['last_edit_pct'] = pct
                 last_report['last_edit_time'] = now
         try:
-            await message.download_media(file=temp_archive_path, progress_callback=progress)
-            actual_size = os.path.getsize(temp_archive_path) if os.path.exists(temp_archive_path) else 0
+            # Use iter_download for more control over chunk size for performance tuning
+            downloaded_bytes = 0
+            chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024
+            with open(temp_archive_path, 'wb') as f:
+                async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    progress(downloaded_bytes, size_bytes)
+
+            actual_size = downloaded_bytes
             total_elapsed = time.time() - start_download_ts
             avg_speed = actual_size / total_elapsed if total_elapsed > 0 else 0
             speed_h = human_size(avg_speed) + '/s'
@@ -270,6 +279,12 @@ async def process_archive_event(event):
                 await status_msg.edit(f'❌ Download failed: {e}')
             except Exception:
                 await event.reply(f'❌ Failed to download archive: {e}')
+            # Clean up partially downloaded file
+            if os.path.exists(temp_archive_path):
+                try:
+                    os.remove(temp_archive_path)
+                except OSError:
+                    pass
             return
 
         # Disk space check

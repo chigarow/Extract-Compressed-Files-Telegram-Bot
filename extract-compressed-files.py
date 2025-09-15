@@ -18,13 +18,6 @@ import configparser
 import asyncio
 import shutil
 import patoolib
-try:
-    import py7zr
-    from py7zr.exceptions import PasswordRequired, DecryptionError, Bad7zFile
-    PY7ZR_AVAILABLE = True
-except Exception:
-    PY7ZR_AVAILABLE = False
-    PasswordRequired = DecryptionError = Bad7zFile = None
 import hashlib
 import json
 import time
@@ -94,7 +87,7 @@ cache_lock = asyncio.Lock()
 semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 # Pending password state: only track one at a time for simplicity
-pending_password = None  # dict keys: archive_path, extract_path, filename, original_event, hash, method
+pending_password = None  # dict keys: archive_path, extract_path, filename, original_event, hash
 
 FFMPEG_AVAILABLE = shutil.which('ffmpeg') is not None
 
@@ -311,43 +304,7 @@ async def process_archive_event(event):
         # Attempt extraction
         try:
             logger.info(f'Start extracting {temp_archive_path} -> {extract_path}')
-            lower_name = filename.lower()
-            # Special handling for .7z if system 7z missing and py7zr available
-            if lower_name.endswith('.7z') and not (shutil.which('7z') or shutil.which('7za') or shutil.which('7zr') or shutil.which('7zz') or shutil.which('7zzs')):
-                if PY7ZR_AVAILABLE:
-                    logger.info('No system 7z found, using py7zr fallback')
-                    try:
-                        with py7zr.SevenZipFile(temp_archive_path, mode='r') as zf:
-                            zf.extractall(path=extract_path)
-                    except PasswordRequired:
-                        # Set pending password state and prompt user
-                        pending_password = {
-                            'archive_path': temp_archive_path,
-                            'extract_path': extract_path,
-                            'filename': filename,
-                            'original_event': event,
-                            'hash': file_hash,
-                            'method': 'py7zr'
-                        }
-                        await event.reply('🔐 7z archive requires password. Use:\n/pass <password>  — attempt extraction\n/cancel            — abort')
-                        return
-                    except DecryptionError as e:
-                        pending_password = {
-                            'archive_path': temp_archive_path,
-                            'extract_path': extract_path,
-                            'filename': filename,
-                            'original_event': event,
-                            'hash': file_hash,
-                            'method': 'py7zr'
-                        }
-                        await event.reply(f'🔐 Encrypted 7z archive. Provide password: /pass <password>')
-                        return
-                    except Bad7zFile as e:
-                        raise patoolib.util.PatoolError(f'7z extraction failed (py7zr Bad7zFile): {e}')
-                else:
-                    raise patoolib.util.PatoolError('Could not extract 7z: no external 7z binary and py7zr not installed')
-            else:
-                patoolib.extract_archive(temp_archive_path, outdir=extract_path)
+            patoolib.extract_archive(temp_archive_path, outdir=extract_path)
             await event.reply('✅ Extraction complete. Scanning media files…')
         except patoolib.util.PatoolError as e:
             err_text = str(e)
@@ -358,8 +315,7 @@ async def process_archive_event(event):
                     'extract_path': extract_path,
                     'filename': filename,
                     'original_event': event,
-                    'hash': file_hash,
-                    'method': 'system'
+                    'hash': file_hash
                 }
                 await event.reply('🔐 Archive requires password. Reply with:\n/pass <password>  — to attempt extraction\n/cancel            — to abort and delete file')
                 return
@@ -429,34 +385,14 @@ async def handle_password_command(event, password: str):
     extract_path = pending_password['extract_path']
     filename = pending_password['filename']
     file_hash = pending_password['hash']
-    method = pending_password.get('method', 'system')
     await event.reply('🔄 Attempting password extraction...')
-    # Clean any leftover partial extraction dir
     try:
-        if os.path.isdir(extract_path):
-            for root, dirs, files in os.walk(extract_path):
-                break  # just checking existence
-    except Exception:
-        pass
-    if method == 'py7zr':
-        if not PY7ZR_AVAILABLE:
-            await event.reply('❌ py7zr module not available anymore.')
-            return
-        # Retry extraction with password
-        try:
-            with py7zr.SevenZipFile(archive_path, mode='r', password=password) as zf:
-                zf.extractall(path=extract_path)
-            await event.reply('✅ Password extraction successful (7z). Scanning media files…')
-        except Exception as e:
-            await event.reply(f'❌ Password extraction failed: {e}\nRetry with /pass <password>')
-            return
-    else:
-        try:
-            extract_with_password(archive_path, extract_path, password)
-            await event.reply('✅ Password extraction successful. Scanning media files…')
-        except Exception as e:
-            await event.reply(f'❌ Password extraction failed: {e}')
-            return
+        extract_with_password(archive_path, extract_path, password)
+        await event.reply('✅ Password extraction successful. Scanning media files…')
+    except Exception as e:
+        await event.reply(f'❌ Password extraction failed: {e}')
+        # Option to retry remains; keep pending
+        return
     # After successful extraction process like normal
     media_files = []
     for root, _, files in os.walk(extract_path):

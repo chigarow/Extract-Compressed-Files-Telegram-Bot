@@ -22,6 +22,8 @@ import hashlib
 import json
 import time
 import subprocess
+import zipfile
+import tarfile
 from logging.handlers import RotatingFileHandler
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
@@ -88,6 +90,9 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 # Pending password state: only track one at a time for simplicity
 pending_password = None  # dict keys: archive_path, extract_path, filename, original_event, hash
+
+# Queue/status tracking
+current_processing = None  # dict with filename, status, start_time, etc.
 
 FFMPEG_AVAILABLE = shutil.which('ffmpeg') is not None
 
@@ -192,7 +197,7 @@ def is_password_error(err_text: str) -> bool:
     return 'password' in t or 'wrong password' in t or 'incorrect password' in t
 
 async def process_archive_event(event):
-    global pending_password
+    global pending_password, current_processing
     async with semaphore:
         message = event.message
         filename = message.file.name or 'file'
@@ -205,6 +210,16 @@ async def process_archive_event(event):
         logger.info(f'Received archive: {filename} size={human_size(size_bytes)}')
         temp_archive_path = os.path.join(DATA_DIR, filename)
         start_download_ts = time.time()
+        
+        # Update current processing status
+        current_processing = {
+            'filename': filename,
+            'status': 'downloading',
+            'start_time': start_download_ts,
+            'size': size_bytes,
+            'progress': 0
+        }
+        
         status_msg = await event.reply(f'⬇️ Download 0% | ETA -- | 0.00 / {human_size(size_bytes)}')
 
         # Progress state & throttling
@@ -218,6 +233,9 @@ async def process_archive_event(event):
                 return
             pct = int(downloaded * 100 / total)
             now = time.time()
+            # Update current processing progress
+            if current_processing:
+                current_processing['progress'] = pct
             # Maintain small window for speed calc (last 5 samples / 20s).
             speed_window.append((now, downloaded))
             # prune
@@ -286,12 +304,17 @@ async def process_archive_event(event):
             except Exception: pass
             return
 
+        # Update status to extracting
+        if current_processing:
+            current_processing['status'] = 'hashing'
+        
         # Hash caching
         try:
             file_hash = compute_sha256(temp_archive_path)
             if file_hash in processed_cache:
                 await event.reply('⏩ Archive already processed earlier. Skipping extraction.')
                 os.remove(temp_archive_path)
+                current_processing = None
                 return
         except Exception as e:
             logger.warning(f'Hashing failed (continuing): {e}')
@@ -300,11 +323,48 @@ async def process_archive_event(event):
         extract_dir_name = f"extracted_{os.path.splitext(filename)[0]}_{int(time.time())}"
         extract_path = os.path.join(DATA_DIR, extract_dir_name)
         os.makedirs(extract_path, exist_ok=True)
+        
+        # Update status to extracting
+        if current_processing:
+            current_processing['status'] = 'extracting'
 
         # Attempt extraction
         try:
             logger.info(f'Start extracting {temp_archive_path} -> {extract_path}')
-            patoolib.extract_archive(temp_archive_path, outdir=extract_path)
+            # Force format detection by file extension to avoid file command issues in Termux
+            try:
+                patoolib.extract_archive(temp_archive_path, outdir=extract_path)
+            except subprocess.CalledProcessError as e:
+                if 'mime-type' in str(e) or 'file' in str(e):
+                    # Fallback: try extraction by guessing format from extension
+                    logger.warning(f'File command issue detected, using extension-based extraction: {e}')
+                    ext = os.path.splitext(filename.lower())[1]
+                    if ext == '.zip':
+                        import zipfile
+                        with zipfile.ZipFile(temp_archive_path, 'r') as zf:
+                            zf.extractall(extract_path)
+                    elif ext == '.rar':
+                        # Try unrar if available
+                        unrar_cmd = shutil.which('unrar')
+                        if unrar_cmd:
+                            subprocess.run([unrar_cmd, 'x', '-y', temp_archive_path, extract_path + '/'], check=True)
+                        else:
+                            raise patoolib.util.PatoolError('RAR extraction failed: unrar not found')
+                    elif ext in ['.7z']:
+                        # Try 7z if available
+                        sevenzip = shutil.which('7z') or shutil.which('7za')
+                        if sevenzip:
+                            subprocess.run([sevenzip, 'x', '-y', f'-o{extract_path}', temp_archive_path], check=True)
+                        else:
+                            raise patoolib.util.PatoolError('7z extraction failed: 7z not found')
+                    elif ext in ['.tar', '.gz', '.bz2', '.xz']:
+                        import tarfile
+                        with tarfile.open(temp_archive_path, 'r:*') as tf:
+                            tf.extractall(extract_path)
+                    else:
+                        raise patoolib.util.PatoolError(f'Unsupported format {ext} and patoolib failed')
+                else:
+                    raise
             await event.reply('✅ Extraction complete. Scanning media files…')
         except patoolib.util.PatoolError as e:
             err_text = str(e)
@@ -335,6 +395,12 @@ async def process_archive_event(event):
         if not media_files:
             await event.reply('ℹ️ No media files found in archive.')
         else:
+            # Update status to uploading
+            if current_processing:
+                current_processing['status'] = 'uploading'
+                current_processing['total_files'] = len(media_files)
+                current_processing['uploaded_files'] = 0
+            
             await event.reply(f'📤 Found {len(media_files)} media files. Uploading to {TARGET_USERNAME} ...')
             target = await ensure_target_entity()
             sent = 0
@@ -351,6 +417,8 @@ async def process_archive_event(event):
                     else:
                         continue  # skip anything not explicitly allowed
                     sent += 1
+                    if current_processing:
+                        current_processing['uploaded_files'] = sent
                     if sent % 10 == 0:
                         logger.info(f'Sent {sent}/{len(media_files)} files')
                 except Exception as e:
@@ -375,6 +443,9 @@ async def process_archive_event(event):
             logger.info('Cleanup complete')
         except Exception as e:
             logger.warning(f'Cleanup issue: {e}')
+        finally:
+            # Clear current processing status
+            current_processing = None
 
 async def handle_password_command(event, password: str):
     global pending_password
@@ -438,6 +509,52 @@ async def handle_password_command(event, password: str):
     pending_password = None
     await event.reply('🧹 Cleanup done.')
 
+async def handle_queue_command(event):
+    """Show current processing status and queue information"""
+    global current_processing, pending_password
+    
+    status_lines = []
+    
+    if current_processing:
+        cp = current_processing
+        elapsed = time.time() - cp['start_time']
+        status_line = f"📁 **{cp['filename']}**\n"
+        status_line += f"Status: {cp['status'].title()}\n"
+        status_line += f"Elapsed: {format_eta(elapsed)}\n"
+        
+        if cp['status'] == 'downloading' and 'progress' in cp:
+            status_line += f"Progress: {cp['progress']}%\n"
+        elif cp['status'] == 'uploading' and 'uploaded_files' in cp and 'total_files' in cp:
+            status_line += f"Upload: {cp['uploaded_files']}/{cp['total_files']} files\n"
+        
+        status_line += f"Size: {human_size(cp['size'])}"
+        status_lines.append(status_line)
+    
+    if pending_password:
+        pp = pending_password
+        status_lines.append(f"🔐 **{pp['filename']}** - Waiting for password")
+    
+    # Check for any leftover files in data directory
+    leftover_files = []
+    try:
+        for item in os.listdir(DATA_DIR):
+            item_path = os.path.join(DATA_DIR, item)
+            if os.path.isfile(item_path) and item.lower().endswith(ARCHIVE_EXTENSIONS):
+                leftover_files.append(item)
+            elif os.path.isdir(item_path) and item.startswith('extracted_'):
+                leftover_files.append(f"{item}/ (extraction folder)")
+    except Exception:
+        pass
+    
+    if leftover_files:
+        status_lines.append(f"📂 **Leftover files:** {len(leftover_files)} items")
+    
+    if not status_lines:
+        await event.reply('📭 **Queue Status:** Empty\nNo active processing or pending tasks.')
+    else:
+        queue_msg = "📋 **Current Queue Status:**\n\n" + "\n\n".join(status_lines)
+        await event.reply(queue_msg)
+
 async def handle_cancel(event):
     global pending_password
     if not pending_password:
@@ -452,6 +569,7 @@ async def handle_cancel(event):
     except Exception as e:
         logger.warning(f'Error during cancel cleanup: {e}')
     pending_password = None
+    current_processing = None
     await event.reply('✅ Operation cancelled and files removed.')
 
 @client.on(events.NewMessage(incoming=True))
@@ -477,6 +595,9 @@ async def watcher(event):
             return
         if txt == '/cancel':
             await handle_cancel(event)
+            return
+        if txt == '/q' or txt == '/queue':
+            await handle_queue_command(event)
             return
 
     # If a document & archive extension & not waiting for password (or waiting but new one arrives -> process anyway after) 

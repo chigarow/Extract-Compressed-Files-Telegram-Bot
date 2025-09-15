@@ -70,8 +70,6 @@ client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 # --- CONFIGURABLE LIMITS (read from config; defaults tuned for Termux device) ---
 MAX_ARCHIVE_GB = config.getfloat('DEFAULT', 'MAX_ARCHIVE_GB', fallback=6.0)  # Skip if bigger than this
 DISK_SPACE_FACTOR = config.getfloat('DEFAULT', 'DISK_SPACE_FACTOR', fallback=2.5)  # Need free >= factor * archive size
-VIDEO_TRANSCODE_THRESHOLD_MB = config.getfloat('DEFAULT', 'VIDEO_TRANSCODE_THRESHOLD_MB', fallback=300.0)
-TRANSCODE_ENABLED = config.getboolean('DEFAULT', 'TRANSCODE_ENABLED', fallback=True)
 MAX_CONCURRENT = config.getint('DEFAULT', 'MAX_CONCURRENT', fallback=1)  # semaphore size
 
 # Cache file path
@@ -94,7 +92,28 @@ pending_password = None  # dict keys: archive_path, extract_path, filename, orig
 # Queue/status tracking
 current_processing = None  # dict with filename, status, start_time, etc.
 
-FFMPEG_AVAILABLE = shutil.which('ffmpeg') is not None
+def check_file_command_supports_mime():
+    """Checks if the system's 'file' command supports the --mime-type flag."""
+    # On some systems like Termux, the 'file' command is older and uses -i.
+    # patoolib uses --mime-type, causing errors. This check prevents that.
+    dummy_path = os.path.join(BASE_DIR, 'file_check.tmp')
+    try:
+        with open(dummy_path, 'w') as f:
+            f.write('test')
+        # We capture stderr to prevent it from printing to the console.
+        result = subprocess.run(
+            ['file', '--brief', '--mime-type', dummy_path],
+            check=True, capture_output=True
+        )
+        # Check for the expected output format
+        return 'text/plain' in result.stdout.decode().lower()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    finally:
+        if os.path.exists(dummy_path):
+            os.remove(dummy_path)
+
+FILE_CMD_OK = check_file_command_supports_mime()
 
 def compute_sha256(path: str, chunk_size: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
@@ -141,45 +160,7 @@ async def ensure_target_entity():  # moved below originally
         logger.error(f'Failed to resolve target username {TARGET_USERNAME}: {e}')
         raise
 
-async def transcode_video_if_needed(path: str) -> str:
-    if not TRANSCODE_ENABLED or not FFMPEG_AVAILABLE:
-        return path
-    try:
-        size_mb = os.path.getsize(path) / (1024 * 1024)
-    except OSError:
-        return path
-    ext = os.path.splitext(path)[1].lower()
-    # Force transcode if not mp4 to enable streaming; otherwise threshold-based
-    force_due_to_container = ext != '.mp4'
-    if size_mb < VIDEO_TRANSCODE_THRESHOLD_MB and not force_due_to_container:
-        return path
-    # Target output path (avoid overriding original until validated)
-    out_path = path + '.mp4' if ext != '.mp4' else path + '.t.mp4'
-    cmd = [
-        'ffmpeg', '-y', '-i', path,
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
-        '-c:a', 'aac', '-b:a', '128k', out_path
-    ]
-    logger.info(f'Transcoding large video ({size_mb:.1f} MB) -> {out_path}')
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # If output smaller, replace; else keep original
-        if os.path.exists(out_path):
-            orig_size = os.path.getsize(path)
-            new_size = os.path.getsize(out_path)
-            if new_size < orig_size * 0.98:  # savings threshold
-                logger.info(f'Transcode saved space: {human_size(orig_size)} -> {human_size(new_size)}')
-                return out_path
-            else:
-                os.remove(out_path)
-                return path
-        return path
-    except Exception as e:
-        logger.warning(f'Transcode failed: {e}')
-        if os.path.exists(out_path):
-            try: os.remove(out_path)
-            except Exception: pass
-        return path
+
 
 def extract_with_password(archive_path: str, extract_path: str, password: str) -> None:
     # Use 7z for universal extraction; requires p7zip (Termux: pkg install p7zip)
@@ -331,43 +312,46 @@ async def process_archive_event(event):
         # Attempt extraction
         try:
             logger.info(f'Start extracting {temp_archive_path} -> {extract_path}')
-            # Force format detection by file extension to avoid file command issues in Termux
-            try:
-                patoolib.extract_archive(temp_archive_path, outdir=extract_path)
-            except subprocess.CalledProcessError as e:
-                if 'mime-type' in str(e) or 'file' in str(e):
-                    # Fallback: try extraction by guessing format from extension
-                    logger.warning(f'File command issue detected, using extension-based extraction: {e}')
-                    ext = os.path.splitext(filename.lower())[1]
-                    if ext == '.zip':
-                        import zipfile
-                        with zipfile.ZipFile(temp_archive_path, 'r') as zf:
-                            zf.extractall(extract_path)
-                    elif ext == '.rar':
-                        # Try unrar if available
-                        unrar_cmd = shutil.which('unrar')
-                        if unrar_cmd:
-                            subprocess.run([unrar_cmd, 'x', '-y', temp_archive_path, extract_path + '/'], check=True)
-                        else:
-                            raise patoolib.util.PatoolError('RAR extraction failed: unrar not found')
-                    elif ext in ['.7z']:
-                        # Try 7z if available
-                        sevenzip = shutil.which('7z') or shutil.which('7za')
-                        if sevenzip:
-                            subprocess.run([sevenzip, 'x', '-y', f'-o{extract_path}', temp_archive_path], check=True)
-                        else:
-                            raise patoolib.util.PatoolError('7z extraction failed: 7z not found')
-                    elif ext in ['.tar', '.gz', '.bz2', '.xz']:
-                        import tarfile
-                        with tarfile.open(temp_archive_path, 'r:*') as tf:
-                            tf.extractall(extract_path)
+
+            # If the system 'file' command is not compatible, use our manual extension-based logic.
+            if not FILE_CMD_OK:
+                logger.warning("System 'file' command is not compatible, using manual extension-based extraction.")
+                ext = os.path.splitext(filename.lower())[1]
+                if ext == '.zip':
+                    with zipfile.ZipFile(temp_archive_path, 'r') as zf:
+                        zf.extractall(extract_path)
+                elif ext == '.rar':
+                    unrar_cmd = shutil.which('unrar')
+                    if unrar_cmd:
+                        # We capture output to prevent it from filling up logs unless there's an error.
+                        subprocess.run([unrar_cmd, 'x', '-y', temp_archive_path, extract_path + '/'], check=True, capture_output=True)
                     else:
-                        raise patoolib.util.PatoolError(f'Unsupported format {ext} and patoolib failed')
+                        raise patoolib.util.PatoolError('RAR extraction failed: unrar command not found')
+                elif ext in ['.7z']:
+                    sevenzip = shutil.which('7z') or shutil.which('7za')
+                    if sevenzip:
+                        subprocess.run([sevenzip, 'x', '-y', f'-o{extract_path}', temp_archive_path], check=True, capture_output=True)
+                    else:
+                        raise patoolib.util.PatoolError('7z extraction failed: 7z command not found')
+                elif ext in ['.tar', '.gz', '.bz2', '.xz']:
+                    with tarfile.open(temp_archive_path, 'r:*') as tf:
+                        tf.extractall(extract_path)
                 else:
-                    raise
+                    # If we don't have a manual handler, try patoolib and let it raise an error.
+                    logger.warning(f"No manual handler for '{ext}', trying patoolib as a last resort.")
+                    patoolib.extract_archive(temp_archive_path, outdir=extract_path)
+            else:
+                # This is the normal path where the 'file' command is compatible.
+                logger.info("System 'file' command is compatible, using patoolib auto-detection.")
+                patoolib.extract_archive(temp_archive_path, outdir=extract_path)
+
             await event.reply('✅ Extraction complete. Scanning media files…')
-        except patoolib.util.PatoolError as e:
+        except (patoolib.util.PatoolError, subprocess.CalledProcessError, zipfile.BadZipFile, tarfile.TarError) as e:
             err_text = str(e)
+            # If the error is from a subprocess, add stderr to the message for more context.
+            if hasattr(e, 'stderr') and e.stderr:
+                err_text += f"\nDetails: {e.stderr.decode(errors='ignore')}"
+
             logger.error(f'Extraction error: {err_text}')
             if is_password_error(err_text):
                 pending_password = {
@@ -380,9 +364,12 @@ async def process_archive_event(event):
                 await event.reply('🔐 Archive requires password. Reply with:\n/pass <password>  — to attempt extraction\n/cancel            — to abort and delete file')
                 return
             else:
-                await event.reply(f'❌ Extraction failed: {e}')
+                # Provide a more detailed error to the user
+                error_summary = str(e).splitlines()[0]
+                await event.reply(f'❌ Extraction failed: {error_summary}')
                 shutil.rmtree(extract_path, ignore_errors=True)
-                os.remove(temp_archive_path)
+                if os.path.exists(temp_archive_path):
+                    os.remove(temp_archive_path)
                 return
 
         # Process media
@@ -406,14 +393,11 @@ async def process_archive_event(event):
             sent = 0
             for path in media_files:
                 ext = os.path.splitext(path)[1].lower()
-                send_path = path
-                if ext in VIDEO_EXTENSIONS:
-                    send_path = await transcode_video_if_needed(path)
                 try:
                     if ext in PHOTO_EXTENSIONS:
-                        await client.send_file(target, send_path, caption=os.path.basename(send_path), force_document=False)
+                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
                     elif ext in VIDEO_EXTENSIONS:
-                        await client.send_file(target, send_path, caption=os.path.basename(send_path), supports_streaming=True, force_document=False)
+                        await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
                     else:
                         continue  # skip anything not explicitly allowed
                     sent += 1
@@ -478,14 +462,11 @@ async def handle_password_command(event, password: str):
         await event.reply(f'📤 Found {len(media_files)} media files. Uploading...')
         for path in media_files:
             ext = os.path.splitext(path)[1].lower()
-            send_path = path
-            if ext in VIDEO_EXTENSIONS:
-                send_path = await transcode_video_if_needed(path)
             try:
                 if ext in PHOTO_EXTENSIONS:
-                    await client.send_file(target, send_path, caption=os.path.basename(send_path), force_document=False)
+                    await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
                 elif ext in VIDEO_EXTENSIONS:
-                    await client.send_file(target, send_path, caption=os.path.basename(send_path), supports_streaming=True, force_document=False)
+                    await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
                 else:
                     continue
                 sent += 1
@@ -614,10 +595,6 @@ async def main_async():
     await client.start()
     me = await client.get_me()
     logger.info(f'Logged in as: {me.id} / {me.username or me.first_name}')
-    if FFMPEG_AVAILABLE:
-        logger.info('ffmpeg detected: video transcoding enabled')
-    else:
-        logger.info('ffmpeg not found: skipping video transcoding')
     logger.info('Waiting for incoming archives from target user...')
     await client.run_until_disconnected()
 

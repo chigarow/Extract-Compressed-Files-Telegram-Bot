@@ -1,0 +1,3 @@
+telethon
+patool
+py7zr

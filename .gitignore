@@ -1,0 +1,11 @@
+secrets.properties
+GEMINI.md
+QWEN.md
+*.pyc
+__pycache__/
+.DS_Store
+data/
+tdl-forward-bot.py
+image/
+venv/
+.history/

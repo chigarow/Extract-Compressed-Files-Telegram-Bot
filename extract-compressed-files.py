@@ -189,6 +189,18 @@ async def process_archive_event(event):
             await event.reply(f'❌ Archive too large ({human_size(size_bytes)}). Limit is {MAX_ARCHIVE_GB} GB.')
             return
 
+        # Check if we've already processed a file with the same name and exact size
+        # Since the size is exact, this is a reliable indicator that it's the same file
+        already_processed = False
+        for file_hash, info in processed_cache.items():
+            if info.get('filename') == filename and info.get('size') == size_bytes:
+                already_processed = True
+                break
+        
+        if already_processed:
+            await event.reply(f'⏩ Archive {filename} with size {human_size(size_bytes)} was already processed. Skipping download and extraction.')
+            return
+
         logger.info(f'Received archive: {filename} size={human_size(size_bytes)}')
         temp_archive_path = os.path.join(DATA_DIR, filename)
         start_download_ts = time.time()
@@ -304,7 +316,9 @@ async def process_archive_event(event):
         if current_processing:
             current_processing['status'] = 'hashing'
         
-        # Hash caching
+        # Hash caching - Check if we've already processed this exact file before
+        # This is the definitive check that uses the file's SHA256 hash to determine
+        # if we've processed this specific file previously, regardless of filename
         try:
             file_hash = compute_sha256(temp_archive_path)
             if file_hash in processed_cache:

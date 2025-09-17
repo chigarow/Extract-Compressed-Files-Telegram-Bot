@@ -285,45 +285,29 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
 
 async def download_file_parallel(client, document, file_path, chunk_size=1024*1024, max_parallel=4):
     """
-    Download a file using parallel chunks for faster downloads, especially for Telegram Premium users.
+    Download a file using sequential chunks with larger chunk size for better performance.
+    Note: True parallel downloads are complex with Telethon, so we use larger chunks instead.
     """
     try:
         # Get file size
         file_size = document.size
         
-        # Initialize a list to hold downloaded chunks in order
-        downloaded_data = [None] * ((file_size + chunk_size - 1) // chunk_size)  # Pre-allocate list
-        
-        # Create tasks for all chunks
-        tasks = []
-        chunk_positions = []
-        
-        # Create all download tasks
-        for i, offset in enumerate(range(0, file_size, chunk_size)):
-            limit = min(chunk_size, file_size - offset)
-            task = asyncio.create_task(client.download_file(document, offset=offset, limit=limit))
-            tasks.append(task)
-            chunk_positions.append(i)
-        
-        # Wait for all tasks to complete
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Process results
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Error downloading chunk {i}: {result}")
-                raise result
-            downloaded_data[chunk_positions[i]] = result
-        
-        # Write all data to file in order
+        # Open file for writing
         with open(file_path, 'wb') as f:
-            for chunk in downloaded_data:
-                if chunk is not None:
-                    f.write(chunk)
+            # Download file sequentially but with larger chunks for better performance
+            # Use a larger chunk size (chunk_size * max_parallel) to simulate parallelism benefits
+            effective_chunk_size = chunk_size * max_parallel
+            offset = 0
+            
+            while offset < file_size:
+                limit = min(effective_chunk_size, file_size - offset)
+                chunk = await client.download_file(document, offset=offset, limit=limit)
+                f.write(chunk)
+                offset += len(chunk)
         
         return file_size
     except Exception as e:
-        logger.error(f"Error in parallel download: {e}")
+        logger.error(f"Error in download: {e}")
         raise
 
 async def save_cache():
@@ -479,7 +463,7 @@ async def process_archive_event(event):
                 await event.reply(f'❌ Download cancelled: {filename}')
                 return
                 
-            # Use parallel download for better performance with Telegram Premium
+            # Use enhanced download for better performance with Telegram Premium
             downloaded_bytes = await download_file_parallel(client, message.document, temp_archive_path, 
                                                           chunk_size=chunk_size, max_parallel=PARALLEL_DOWNLOADS)
             

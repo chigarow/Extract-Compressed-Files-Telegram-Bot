@@ -309,15 +309,18 @@ async def download_file_parallel(client, document, file_path, chunk_size=1024*10
                     # Calculate limit (chunk size or remaining bytes)
                     limit = min(chunk_size, file_size - offset)
                     
-                    # Create a task for this chunk
-                    task = client.download_file(document, offset=offset, limit=limit)
+                    # Create a task for this chunk using iter_download
+                    task = client.iter_download(document, offset=offset, limit=limit)
                     current_tasks.append((task, offset, limit))
                     offset += limit
                 
                 # Wait for all current tasks to complete
                 for task, chunk_offset, chunk_limit in current_tasks:
                     try:
-                        chunk_data = await task
+                        # Collect all chunks from the iterator
+                        chunk_data = b""
+                        async for chunk in task:
+                            chunk_data += chunk
                         downloaded_chunks[chunk_offset] = chunk_data
                     except Exception as e:
                         logger.error(f"Error downloading chunk at offset {chunk_offset}: {e}")

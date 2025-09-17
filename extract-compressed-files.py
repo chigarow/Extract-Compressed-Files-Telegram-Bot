@@ -807,6 +807,7 @@ async def handle_queue_command(event):
     
     status_lines = []
     
+    # Show current processing file
     if current_processing:
         cp = current_processing
         elapsed = time.time() - cp['start_time']
@@ -822,27 +823,39 @@ async def handle_queue_command(event):
         status_line += f"Size: {human_size(cp['size'])}"
         status_lines.append(status_line)
     
+    # Show pending password-protected archive
     if pending_password:
         pp = pending_password
         status_lines.append(f"🔐 **{pp['filename']}** - Waiting for password")
     
-    # Check for any leftover files in data directory
-    leftover_files = []
+    # Check for queued files in data directory (excluding currently processing file)
+    queued_files = []
+    current_filename = current_processing.get('filename') if current_processing else None
+    
     try:
         for item in os.listdir(DATA_DIR):
             item_path = os.path.join(DATA_DIR, item)
             if os.path.isfile(item_path) and item.lower().endswith(ARCHIVE_EXTENSIONS):
-                leftover_files.append(item)
+                # Skip the currently processing file
+                if item != current_filename:
+                    queued_files.append(item)
             elif os.path.isdir(item_path) and item.startswith('extracted_'):
-                leftover_files.append(f"{item}/ (extraction folder)")
+                # Skip extraction directories for currently processing file
+                if not (current_filename and item.startswith(f"extracted_{os.path.splitext(current_filename)[0]}")):
+                    queued_files.append(f"{item}/ (extraction folder)")
     except Exception:
         pass
     
-    if leftover_files:
-        status_lines.append(f"📂 **Leftover files:** {len(leftover_files)} items")
+    # Show queued files with details
+    if queued_files:
+        queued_list = "\n".join([f"• {f}" for f in queued_files])
+        status_lines.append(f"🕒 **Queued files ({len(queued_files)}):**\n{queued_list}")
+    elif current_processing or pending_password:
+        # Show that there are no queued files
+        status_lines.append("🕒 **Queued files:** None")
     
     if not status_lines:
-        await event.reply('📭 **Queue Status:** Empty\nNo active processing or pending tasks.')
+        await event.reply('📭 **Queue Status:** Empty\nNo active processing or queued tasks.')
     else:
         queue_msg = "📋 **Current Queue Status:**\n\n" + "\n\n".join(status_lines)
         await event.reply(queue_msg)

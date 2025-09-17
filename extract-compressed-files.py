@@ -518,43 +518,98 @@ async def process_archive_event(event):
                 current_processing['total_files'] = len(media_files)
                 current_processing['uploaded_files'] = 0
             
-            await event.reply(f'📤 Found {len(media_files)} media files. Uploading to {TARGET_USERNAME} ...')
-            target = await ensure_target_entity()
-            sent = 0
+            # Separate images and videos
+            image_files = []
+            video_files = []
             for path in media_files:
                 ext = os.path.splitext(path)[1].lower()
+                if ext in PHOTO_EXTENSIONS:
+                    image_files.append(path)
+                elif ext in VIDEO_EXTENSIONS:
+                    video_files.append(path)
+            
+            # Get archive name without extension for captions
+            archive_name = os.path.splitext(filename)[0]
+            
+            await event.reply(f'📤 Found {len(media_files)} media files ({len(image_files)} images, {len(video_files)} videos). Uploading to {TARGET_USERNAME} ...')
+            target = await ensure_target_entity()
+            sent = 0
+            
+            # Upload images first as a group
+            if image_files:
                 try:
-                    if ext in PHOTO_EXTENSIONS:
-                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
-                    elif ext in VIDEO_EXTENSIONS:
-                        # Check if video compression is enabled
-                        if TRANSCODE_ENABLED:
-                            # Compress all video files to MP4 format for better Telegram streaming
-                            compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
-                            if compress_video_for_telegram(path, compressed_path):
-                                # If compression is successful, send the compressed file
-                                await client.send_file(target, compressed_path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
-                                # Clean up the compressed file after sending
-                                try:
-                                    os.remove(compressed_path)
-                                except:
-                                    pass
-                            else:
-                                # If compression fails, send the original file
-                                await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
-                        else:
-                            # Send videos as-is when compression is disabled
-                            await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
-                    else:
-                        continue  # skip anything not explicitly allowed
-                    sent += 1
+                    await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True)
+                    sent += len(image_files)
                     if current_processing:
                         current_processing['uploaded_files'] = sent
-                    if sent % 10 == 0:
-                        logger.info(f'Sent {sent}/{len(media_files)} files')
+                    logger.info(f'Sent {len(image_files)} images as group')
                 except Exception as e:
-                    logger.error(f'Failed to send {path}: {e}')
-                    await event.reply(f'Error sending {os.path.basename(path)}: {e}')
+                    logger.error(f'Failed to send image group: {e}')
+                    # Fallback to individual uploads if group upload fails
+                    for path in image_files:
+                        try:
+                            await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
+                            sent += 1
+                            if current_processing:
+                                current_processing['uploaded_files'] = sent
+                        except Exception as e:
+                            logger.error(f'Failed to send {path}: {e}')
+                            await event.reply(f'Error sending {os.path.basename(path)}: {e}')
+            
+            # Upload videos as a group
+            video_files_to_send = []
+            compressed_video_paths = []  # Keep track of compressed files for cleanup
+            
+            for path in video_files:
+                ext = os.path.splitext(path)[1].lower()
+                try:
+                    if TRANSCODE_ENABLED:
+                        # Compress all video files to MP4 format for better Telegram streaming
+                        compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
+                        if compress_video_for_telegram(path, compressed_path):
+                            # If compression is successful, add the compressed file to the list
+                            video_files_to_send.append(compressed_path)
+                            compressed_video_paths.append(compressed_path)
+                        else:
+                            # If compression fails, add the original file
+                            video_files_to_send.append(path)
+                    else:
+                        # Add videos as-is when compression is disabled
+                        video_files_to_send.append(path)
+                except Exception as e:
+                    logger.error(f'Error preparing video {path}: {e}')
+                    # Add the original file if there's an error in preparation
+                    video_files_to_send.append(path)
+            
+            # Send videos as a group
+            if video_files_to_send:
+                try:
+                    await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True)
+                    sent += len(video_files_to_send)
+                    if current_processing:
+                        current_processing['uploaded_files'] = sent
+                    logger.info(f'Sent {len(video_files_to_send)} videos as group')
+                except Exception as e:
+                    logger.error(f'Failed to send video group: {e}')
+                    # Fallback to individual uploads if group upload fails
+                    for i, path in enumerate(video_files_to_send):
+                        original_path = video_files[i]  # Get the original path for error messages
+                        try:
+                            await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False)
+                            sent += 1
+                            if current_processing:
+                                current_processing['uploaded_files'] = sent
+                        except Exception as e:
+                            logger.error(f'Failed to send {original_path}: {e}')
+                            await event.reply(f'Error sending {os.path.basename(original_path)}: {e}')
+            
+            # Clean up compressed video files
+            for compressed_path in compressed_video_paths:
+                try:
+                    os.remove(compressed_path)
+                except:
+                    pass
+            
             await event.reply(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
 
         # Update cache
@@ -604,38 +659,88 @@ async def handle_password_command(event, password: str):
     if not media_files:
         await event.reply('ℹ️ No media files found in archive.')
     else:
-        target = await ensure_target_entity()
-        sent = 0
-        await event.reply(f'📤 Found {len(media_files)} media files. Uploading...')
+        # Get archive name without extension for captions
+        archive_name = os.path.splitext(filename)[0]
+        
+        # Separate images and videos
+        image_files = []
+        video_files = []
         for path in media_files:
             ext = os.path.splitext(path)[1].lower()
+            if ext in PHOTO_EXTENSIONS:
+                image_files.append(path)
+            elif ext in VIDEO_EXTENSIONS:
+                video_files.append(path)
+        
+        target = await ensure_target_entity()
+        sent = 0
+        await event.reply(f'📤 Found {len(media_files)} media files ({len(image_files)} images, {len(video_files)} videos). Uploading...')
+        
+        # Upload images first as a group
+        if image_files:
             try:
-                if ext in PHOTO_EXTENSIONS:
-                    await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
-                elif ext in VIDEO_EXTENSIONS:
-                    # Check if video compression is enabled
-                    if TRANSCODE_ENABLED:
-                        # Compress all video files to MP4 format for better Telegram streaming
-                        compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
-                        if compress_video_for_telegram(path, compressed_path):
-                            # If compression is successful, send the compressed file
-                            await client.send_file(target, compressed_path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
-                            # Clean up the compressed file after sending
-                            try:
-                                os.remove(compressed_path)
-                            except:
-                                pass
-                        else:
-                            # If compression fails, send the original file
-                            await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
-                    else:
-                        # Send videos as-is when compression is disabled
-                        await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
-                else:
-                    continue
-                sent += 1
+                await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True)
+                sent += len(image_files)
+                logger.info(f'Sent {len(image_files)} images as group')
             except Exception as e:
-                await event.reply(f'Error sending {os.path.basename(path)}: {e}')
+                logger.error(f'Failed to send image group: {e}')
+                # Fallback to individual uploads if group upload fails
+                for path in image_files:
+                    try:
+                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
+                        sent += 1
+                    except Exception as e:
+                        await event.reply(f'Error sending {os.path.basename(path)}: {e}')
+        
+        # Upload videos as a group
+        video_files_to_send = []
+        compressed_video_paths = []  # Keep track of compressed files for cleanup
+        
+        for path in video_files:
+            ext = os.path.splitext(path)[1].lower()
+            try:
+                if TRANSCODE_ENABLED:
+                    # Compress all video files to MP4 format for better Telegram streaming
+                    compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
+                    if compress_video_for_telegram(path, compressed_path):
+                        # If compression is successful, add the compressed file to the list
+                        video_files_to_send.append(compressed_path)
+                        compressed_video_paths.append(compressed_path)
+                    else:
+                        # If compression fails, add the original file
+                        video_files_to_send.append(path)
+                else:
+                    # Add videos as-is when compression is disabled
+                    video_files_to_send.append(path)
+            except Exception as e:
+                logger.error(f'Error preparing video {path}: {e}')
+                # Add the original file if there's an error in preparation
+                video_files_to_send.append(path)
+        
+        # Send videos as a group
+        if video_files_to_send:
+            try:
+                await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True)
+                sent += len(video_files_to_send)
+                logger.info(f'Sent {len(video_files_to_send)} videos as group')
+            except Exception as e:
+                logger.error(f'Failed to send video group: {e}')
+                # Fallback to individual uploads if group upload fails
+                for i, path in enumerate(video_files_to_send):
+                    original_path = video_files[i]  # Get the original path for error messages
+                    try:
+                        await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False)
+                        sent += 1
+                    except Exception as e:
+                        await event.reply(f'Error sending {os.path.basename(original_path)}: {e}')
+        
+        # Clean up compressed video files
+        for compressed_path in compressed_video_paths:
+            try:
+                os.remove(compressed_path)
+            except:
+                pass
+        
         await event.reply(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
     if file_hash:
         processed_cache[file_hash] = {

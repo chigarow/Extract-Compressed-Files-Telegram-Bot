@@ -72,6 +72,8 @@ MAX_ARCHIVE_GB = config.getfloat('DEFAULT', 'MAX_ARCHIVE_GB', fallback=6.0)  # S
 DISK_SPACE_FACTOR = config.getfloat('DEFAULT', 'DISK_SPACE_FACTOR', fallback=2.5)  # Need free >= factor * archive size
 MAX_CONCURRENT = config.getint('DEFAULT', 'MAX_CONCURRENT', fallback=1)  # semaphore size
 DOWNLOAD_CHUNK_SIZE_KB = config.getint('DEFAULT', 'DOWNLOAD_CHUNK_SIZE_KB', fallback=512) # Affects download speed
+VIDEO_TRANSCODE_THRESHOLD_MB = config.getint('DEFAULT', 'VIDEO_TRANSCODE_THRESHOLD_MB', fallback=100)  # Transcode videos larger than this
+TRANSCODE_ENABLED = config.getboolean('DEFAULT', 'TRANSCODE_ENABLED', fallback=False)  # Enable/disable video transcoding
 
 # Cache file path
 PROCESSED_CACHE_PATH = os.path.join(DATA_DIR, 'processed_archives.json')
@@ -125,6 +127,51 @@ def compute_sha256(path: str, chunk_size: int = 1024 * 1024) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+def is_ffmpeg_available():
+    """Check if ffmpeg is available in the system"""
+    return shutil.which('ffmpeg') is not None
+
+def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
+    """
+    Compress video to MP4 format optimized for Telegram streaming.
+    Uses fast compression settings to minimize processing time.
+    """
+    if not is_ffmpeg_available():
+        logger.warning("ffmpeg not found, skipping video compression")
+        return False
+    
+    try:
+        # Fast MP4 compression settings optimized for Telegram
+        # Using ultrafast preset for speed, h264 codec for compatibility
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '28',  # Quality setting (lower = better quality, 28 is a good balance)
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-movflags', '+faststart',  # Optimize for streaming
+            '-y',  # Overwrite output file
+            output_path
+        ]
+        
+        logger.info(f"Compressing video: {input_path} -> {output_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 min timeout
+        
+        if result.returncode == 0:
+            logger.info(f"Video compression successful: {output_path}")
+            return True
+        else:
+            logger.error(f"Video compression failed: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        logger.error("Video compression timed out")
+        return False
+    except Exception as e:
+        logger.error(f"Error during video compression: {e}")
+        return False
 
 async def save_cache():
     async with cache_lock:
@@ -390,7 +437,7 @@ async def process_archive_event(event):
                     'original_event': event,
                     'hash': file_hash
                 }
-                await event.reply('🔐 Archive requires password. Reply with:\n/pass <password>  — to attempt extraction\n/cancel            — to abort and delete file')
+                await event.reply('🔐 Archive requires password. Reply with:\n/pass <password>        — to attempt extraction\n/cancel-password        — to abort and delete file')
                 return
             else:
                 # Provide a more detailed error to the user
@@ -426,7 +473,24 @@ async def process_archive_event(event):
                     if ext in PHOTO_EXTENSIONS:
                         await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
                     elif ext in VIDEO_EXTENSIONS:
-                        await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
+                        # Check if video compression is enabled
+                        if TRANSCODE_ENABLED:
+                            # Compress all video files to MP4 format for better Telegram streaming
+                            compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
+                            if compress_video_for_telegram(path, compressed_path):
+                                # If compression is successful, send the compressed file
+                                await client.send_file(target, compressed_path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
+                                # Clean up the compressed file after sending
+                                try:
+                                    os.remove(compressed_path)
+                                except:
+                                    pass
+                            else:
+                                # If compression fails, send the original file
+                                await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
+                        else:
+                            # Send videos as-is when compression is disabled
+                            await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
                     else:
                         continue  # skip anything not explicitly allowed
                     sent += 1
@@ -495,7 +559,24 @@ async def handle_password_command(event, password: str):
                 if ext in PHOTO_EXTENSIONS:
                     await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
                 elif ext in VIDEO_EXTENSIONS:
-                    await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
+                    # Check if video compression is enabled
+                    if TRANSCODE_ENABLED:
+                        # Compress all video files to MP4 format for better Telegram streaming
+                        compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
+                        if compress_video_for_telegram(path, compressed_path):
+                            # If compression is successful, send the compressed file
+                            await client.send_file(target, compressed_path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
+                            # Clean up the compressed file after sending
+                            try:
+                                os.remove(compressed_path)
+                            except:
+                                pass
+                        else:
+                            # If compression fails, send the original file
+                            await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
+                    else:
+                        # Send videos as-is when compression is disabled
+                        await client.send_file(target, path, caption=os.path.basename(path), supports_streaming=True, force_document=False)
                 else:
                     continue
                 sent += 1
@@ -565,7 +646,8 @@ async def handle_queue_command(event):
         queue_msg = "📋 **Current Queue Status:**\n\n" + "\n\n".join(status_lines)
         await event.reply(queue_msg)
 
-async def handle_cancel(event):
+async def handle_cancel_password(event):
+    """Cancel password input for a password-protected archive"""
     global pending_password
     if not pending_password:
         await event.reply('ℹ️ No pending password-protected archive.')
@@ -580,7 +662,34 @@ async def handle_cancel(event):
         logger.warning(f'Error during cancel cleanup: {e}')
     pending_password = None
     current_processing = None
-    await event.reply('✅ Operation cancelled and files removed.')
+    await event.reply('✅ Password input cancelled and files removed.')
+
+async def handle_cancel_extraction(event):
+    """Cancel the current extraction process"""
+    global current_processing, pending_password
+    if not current_processing:
+        await event.reply('ℹ️ No extraction currently in progress.')
+        return
+    
+    # Store the file being processed for the response
+    filename = current_processing.get('filename', 'unknown file')
+    
+    # Clean up any pending password state as well
+    if pending_password:
+        try:
+            archive_path = pending_password['archive_path']
+            extract_path = pending_password['extract_path']
+            shutil.rmtree(extract_path, ignore_errors=True)
+            if os.path.exists(archive_path):
+                os.remove(archive_path)
+        except Exception as e:
+            logger.warning(f'Error during cancel extraction cleanup: {e}')
+        pending_password = None
+    
+    # Clear current processing
+    current_processing = None
+    
+    await event.reply(f'✅ Extraction of "{filename}" has been cancelled.')
 
 @client.on(events.NewMessage(incoming=True))
 async def watcher(event):
@@ -603,8 +712,11 @@ async def watcher(event):
             else:
                 await event.reply('Usage: /pass <password>')
             return
-        if txt == '/cancel':
-            await handle_cancel(event)
+        if txt == '/cancel-password':
+            await handle_cancel_password(event)
+            return
+        if txt == '/cancel-extraction':
+            await handle_cancel_extraction(event)
             return
         if txt == '/q' or txt == '/queue':
             await handle_queue_command(event)

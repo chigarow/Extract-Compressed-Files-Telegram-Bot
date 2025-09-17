@@ -144,29 +144,72 @@ def is_ffmpeg_available():
     """Check if ffmpeg is available in the system"""
     return shutil.which('ffmpeg') is not None
 
+def is_ffprobe_available():
+    """Check if ffprobe is available in the system"""
+    return shutil.which('ffprobe') is not None
+
+def validate_video_file(file_path: str) -> dict:
+    """
+    Validate video file and extract metadata using ffprobe.
+    Returns a dictionary with video information or empty dict if validation fails.
+    """
+    if not is_ffprobe_available():
+        logger.warning("ffprobe not found, skipping video validation")
+        return {}
+    
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
+            file_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            import json
+            info = json.loads(result.stdout)
+            return info
+        else:
+            logger.error(f"Video validation failed for {file_path}: {result.stderr}")
+            return {}
+    except Exception as e:
+        logger.error(f"Error during video validation for {file_path}: {e}")
+        return {}
+
 def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
     """
     Compress video to MP4 format optimized for Telegram streaming.
-    Uses compatible compression settings to ensure proper metadata and streaming.
+    Uses compatible compression settings to ensure proper metadata, thumbnails, and duration display.
     """
     if not is_ffmpeg_available():
         logger.warning("ffmpeg not found, skipping video compression")
         return False
     
     try:
-        # More compatible MP4 compression settings optimized for Telegram
-        # Using superfast preset for better compatibility than ultrafast
+        # Enhanced MP4 compression settings optimized for Telegram
+        # These settings ensure proper thumbnail generation and duration display
         cmd = [
             'ffmpeg',
             '-i', input_path,
             '-c:v', 'libx264',
-            '-preset', 'superfast',  # More compatible than ultrafast
+            '-preset', 'superfast',  # Faster encoding with good compatibility
             '-crf', '28',  # Quality setting (lower = better quality, 28 is a good balance)
             '-c:a', 'aac',
             '-b:a', '128k',
+            '-ar', '44100',  # Standard audio sample rate
             '-movflags', '+faststart',  # Optimize for streaming
+            '-pix_fmt', 'yuv420p',  # Ensures compatibility with Telegram
+            '-profile:v', 'baseline',  # Ensures compatibility with Telegram
+            '-level', '3.0',  # Ensures compatibility with Telegram
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',  # Ensure even dimensions for compatibility
             '-fflags', '+genpts',  # Generate presentation timestamps for proper duration display
             '-avoid_negative_ts', 'make_zero',  # Fix timing issues
+            '-metadata', 'title=',  # Clear title metadata to avoid conflicts
+            '-metadata', 'comment=',  # Clear comment metadata to avoid conflicts
             '-y',  # Overwrite output file
             output_path
         ]
@@ -599,10 +642,15 @@ async def process_archive_event(event):
             for path in video_files:
                 ext = os.path.splitext(path)[1].lower()
                 try:
+                    # Validate video file before processing
+                    video_info = validate_video_file(path)
+                    
                     if TRANSCODE_ENABLED:
                         # Compress all video files to MP4 format for better Telegram streaming
                         compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
                         if compress_video_for_telegram(path, compressed_path):
+                            # Validate compressed video as well
+                            compressed_info = validate_video_file(compressed_path)
                             # If compression is successful, add the compressed file to the list
                             video_files_to_send.append(compressed_path)
                             compressed_video_paths.append(compressed_path)
@@ -738,10 +786,15 @@ async def handle_password_command(event, password: str):
         for path in video_files:
             ext = os.path.splitext(path)[1].lower()
             try:
+                # Validate video file before processing
+                video_info = validate_video_file(path)
+                
                 if TRANSCODE_ENABLED:
                     # Compress all video files to MP4 format for better Telegram streaming
                     compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
                     if compress_video_for_telegram(path, compressed_path):
+                        # Validate compressed video as well
+                        compressed_info = validate_video_file(compressed_path)
                         # If compression is successful, add the compressed file to the list
                         video_files_to_send.append(compressed_path)
                         compressed_video_paths.append(compressed_path)

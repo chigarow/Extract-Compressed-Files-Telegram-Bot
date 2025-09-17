@@ -283,26 +283,6 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
         logger.error(f"Error during video compression: {e}")
         return False
 
-async def download_file_parallel(client, document, file_path, chunk_size=1024*1024, max_parallel=4):
-    """
-    Download a file sequentially with progress reporting.
-    Uses iter_download for chunked downloads which is the correct Telethon approach.
-    """
-    try:
-        # Get file size
-        file_size = document.size
-        
-        # Open file for writing
-        with open(file_path, 'wb') as f:
-            # Use iter_download for chunked downloads - this is the correct Telethon approach
-            async for chunk in client.iter_download(document, chunk_size=chunk_size):
-                f.write(chunk)
-        
-        return file_size
-    except Exception as e:
-        logger.error(f"Error in download: {e}")
-        raise
-
 async def save_cache():
     async with cache_lock:
         tmp = PROCESSED_CACHE_PATH + '.tmp'
@@ -456,9 +436,8 @@ async def process_archive_event(event):
                 await event.reply(f'❌ Download cancelled: {filename}')
                 return
                 
-            # Use enhanced download for better performance with Telegram Premium
-            downloaded_bytes = await download_file_parallel(client, message.document, temp_archive_path, 
-                                                          chunk_size=chunk_size, max_parallel=PARALLEL_DOWNLOADS)
+            # Use simple download for reliability - reverted to working version
+            downloaded_bytes = await download_file_parallel(client, message.document, temp_archive_path)
             
             actual_size = downloaded_bytes
             total_elapsed = time.time() - start_download_ts

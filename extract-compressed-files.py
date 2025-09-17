@@ -297,7 +297,6 @@ async def download_file_parallel(client, document, file_path, chunk_size=1024*10
             downloaded_chunks = {}
             
             # Download in parallel chunks
-            tasks = []
             offset = 0
             
             while offset < file_size:
@@ -489,7 +488,7 @@ async def process_archive_event(event):
                 return
                 
             # Use parallel download for better performance with Telegram Premium
-            downloaded_bytes = await download_file_parallel(client, message, temp_archive_path, 
+            downloaded_bytes = await download_file_parallel(client, message.document, temp_archive_path, 
                                                           chunk_size=chunk_size, max_parallel=PARALLEL_DOWNLOADS)
             
             actual_size = downloaded_bytes

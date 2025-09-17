@@ -436,8 +436,29 @@ async def process_archive_event(event):
                 await event.reply(f'❌ Download cancelled: {filename}')
                 return
                 
-            # Use simple download for reliability - reverted to working version
-            downloaded_bytes = await download_file_parallel(client, message.document, temp_archive_path)
+            # Use iter_download for more control over chunk size for performance tuning
+            # For Telegram Premium, we can use larger chunks for better performance
+            downloaded_bytes = 0
+            chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size (default 1MB for Premium)
+            with open(temp_archive_path, 'wb') as f:
+                async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
+                    # Check if the process has been cancelled
+                    if filename in cancelled_operations:
+                        cancelled_operations.discard(filename)
+                        # Clean up partially downloaded file
+                        if os.path.exists(temp_archive_path):
+                            try:
+                                os.remove(temp_archive_path)
+                            except OSError:
+                                pass
+                        await event.reply(f'❌ Download cancelled: {filename}')
+                        # Clear download task
+                        ongoing_operations['download'] = None
+                        return
+                    
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    progress(downloaded_bytes, size_bytes)
             
             actual_size = downloaded_bytes
             total_elapsed = time.time() - start_download_ts

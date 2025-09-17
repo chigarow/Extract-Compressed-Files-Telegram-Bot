@@ -16,11 +16,12 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Progress Tracking**: Provides real-time status updates during download, extraction, and upload processes.
 - **Configurable Limits**: Adjustable settings for maximum file size, disk space requirements, and concurrent processing.
 - **Queue Monitoring**: Built-in status command to check current processing state.
+- **Concurrent Downloads**: Supports multiple simultaneous downloads with sequential extraction/upload processing.
 
 ## Prerequisites
 
 - Python 3.7+
-- Required system tools: `7z` (p7zip) for password-protected archives, `unrar` for RAR files
+- Required system tools: `7z` (p7zip) for password-protected archives, `unrar` for RAR files, `ffmpeg` and `ffprobe` for video processing
 - A Telegram account with API credentials
 
 ## Setup
@@ -53,13 +54,14 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
         # DISK_SPACE_FACTOR=2.5
         # MAX_CONCURRENT=1
         # DOWNLOAD_CHUNK_SIZE_KB=512
+        # PARALLEL_DOWNLOADS=4
         ```
 
 4.  **Install system dependencies (if needed):**
 
     On Termux:
     ```bash
-    pkg install p7zip unrar
+    pkg install p7zip unrar ffmpeg
     ```
 
     On Ubuntu/Debian:
@@ -101,9 +103,13 @@ This feature makes it easier to identify which files came from which archive.
 
 The script includes an optional fast video compression feature that converts all video files to MP4 format optimized for Telegram streaming. This feature:
 
-- Uses compatible ffmpeg settings for proper metadata and duration display
+- Uses enhanced ffmpeg settings to ensure proper metadata, thumbnails, and duration display
 - Converts all video files regardless of their format or size
 - Optimizes videos for Telegram's streaming capabilities
+- Ensures compatibility with Telegram's video requirements (H.264 baseline profile, proper pixel format, even dimensions)
+- Fixes common issues with black thumbnails and 00:00 duration display
+- Validates video files before processing using ffprobe
+- Only processes videos that need processing (skips already compliant MP4 files when possible)
 
 To enable this feature, set `TRANSCODE_ENABLED=true` in your `secrets.properties` file.
 
@@ -131,10 +137,14 @@ The script provides several commands to cancel ongoing processes:
 - Reply with `/cancel-password` to cancel password input for a password-protected archive
 - Reply with `/cancel-extraction` to cancel the current extraction process
 - Reply with `/cancel-process` to cancel the entire process and delete any downloaded files
+- Reply with `/max_concurrent <number>` to dynamically change the maximum number of concurrent downloads
 
 ### Checking Processing Status
 
-You can check the current processing status by sending `/queue` or `/q` to the script.
+You can check the current processing status by sending `/queue` or `/q` to the script. The queue status now shows:
+- Currently processing files (download, extraction, or upload)
+- Password-protected archives waiting for input
+- Processing queue (files that have completed download and are waiting for extraction/upload)
 
 ## Configuration Options
 
@@ -145,6 +155,7 @@ The following options can be added to `secrets.properties` to customize behavior
 - `MAX_CONCURRENT` - Maximum concurrent extractions (default: 1)
 - `DOWNLOAD_CHUNK_SIZE_KB` - Download chunk size in KB (default: 512)
 - `TRANSCODE_ENABLED` - Enable/disable video compression feature (default: false)
+- `PARALLEL_DOWNLOADS` - Number of parallel downloads for faster speed (default: 4)
 
 ## How It Works
 

@@ -74,6 +74,7 @@ DISK_SPACE_FACTOR = config.getfloat('DEFAULT', 'DISK_SPACE_FACTOR', fallback=2.5
 MAX_CONCURRENT = config.getint('DEFAULT', 'MAX_CONCURRENT', fallback=1)  # semaphore size
 # For Telegram Premium users, we can use larger chunk sizes (up to 1MB) for better download performance
 DOWNLOAD_CHUNK_SIZE_KB = config.getint('DEFAULT', 'DOWNLOAD_CHUNK_SIZE_KB', fallback=1024) # Increased for Telegram Premium (default: 1024 KB)
+PARALLEL_DOWNLOADS = config.getint('DEFAULT', 'PARALLEL_DOWNLOADS', fallback=4)  # Number of parallel downloads for better speed
 VIDEO_TRANSCODE_THRESHOLD_MB = config.getint('DEFAULT', 'VIDEO_TRANSCODE_THRESHOLD_MB', fallback=100)  # Transcode videos larger than this
 TRANSCODE_ENABLED = config.getboolean('DEFAULT', 'TRANSCODE_ENABLED', fallback=False)  # Enable/disable video transcoding
 
@@ -486,30 +487,10 @@ async def process_archive_event(event):
                 await event.reply(f'❌ Download cancelled: {filename}')
                 return
                 
-            # Use iter_download for more control over chunk size for performance tuning
-            # For Telegram Premium, we can use larger chunks for better performance
-            downloaded_bytes = 0
-            chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size (default 1MB for Premium)
-            with open(temp_archive_path, 'wb') as f:
-                async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
-                    # Check if the process has been cancelled
-                    if filename in cancelled_operations:
-                        cancelled_operations.discard(filename)
-                        # Clean up partially downloaded file
-                        if os.path.exists(temp_archive_path):
-                            try:
-                                os.remove(temp_archive_path)
-                            except OSError:
-                                pass
-                        await event.reply(f'❌ Download cancelled: {filename}')
-                        # Clear download task
-                        ongoing_operations['download'] = None
-                        return
-                    
-                    f.write(chunk)
-                    downloaded_bytes += len(chunk)
-                    progress(downloaded_bytes, size_bytes)
-
+            # Use parallel download for better performance with Telegram Premium
+            downloaded_bytes = await download_file_parallel(client, message, temp_archive_path, 
+                                                          chunk_size=chunk_size, max_parallel=PARALLEL_DOWNLOADS)
+            
             actual_size = downloaded_bytes
             total_elapsed = time.time() - start_download_ts
             avg_speed = actual_size / total_elapsed if total_elapsed > 0 else 0

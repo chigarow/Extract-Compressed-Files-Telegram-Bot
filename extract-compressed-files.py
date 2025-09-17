@@ -404,12 +404,14 @@ async def process_archive_event(event):
             eta = remaining / inst_speed if inst_speed > 0 else float('inf')
             should_log = pct >= last_report['pct'] + 5 or (now - last_report['time']) >= 10
             if should_log:
-                logger.info(f'Download progress {filename}: {pct}% ({human_size(downloaded)}/{human_size(total)}) ETA {format_eta(eta)}')
+                speed_h = human_size(inst_speed) + '/s'
+                logger.info(f'Download progress {filename}: {pct}% ({human_size(downloaded)}/{human_size(total)}) ETA {format_eta(eta)} ({speed_h})')
                 last_report['pct'] = pct
                 last_report['time'] = now
             should_edit = (pct >= last_report['last_edit_pct'] + MIN_PCT_STEP) or ((now - last_report['last_edit_time']) >= MIN_EDIT_INTERVAL)
             if should_edit:
-                txt = (f'⬇️ Download {pct}% | ETA {format_eta(eta)} | '
+                speed_h = human_size(inst_speed) + '/s'
+                txt = (f'⬇️ Download {pct}% | ETA {format_eta(eta)} | {speed_h} | '
                        f'{human_size(downloaded)} / {human_size(total)}')
                 # Schedule async edit (can't await here)
                 async def do_edit():

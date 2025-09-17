@@ -124,11 +124,13 @@ If the script encounters a password-protected archive, it will prompt you with i
 - Reply with `/pass <password>` to attempt extraction with a password
 - Reply with `/cancel-password` to abort password input and delete the file
 
-### Canceling Extraction
+### Canceling Processes
 
-If you need to cancel an ongoing extraction process, you can use:
+The script provides several commands to cancel ongoing processes:
 
-- Reply with `/cancel-extraction` to stop the current extraction and delete temporary files
+- Reply with `/cancel-password` to cancel password input for a password-protected archive
+- Reply with `/cancel-extraction` to cancel the current extraction process
+- Reply with `/cancel-process` to cancel the entire process and delete any downloaded files
 
 ### Checking Processing Status
 

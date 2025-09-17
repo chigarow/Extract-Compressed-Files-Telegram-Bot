@@ -96,6 +96,14 @@ pending_password = None  # dict keys: archive_path, extract_path, filename, orig
 # Queue/status tracking
 current_processing = None  # dict with filename, status, start_time, etc.
 
+# Track ongoing operations for cancellation
+ongoing_operations = {
+    'download': None,     # track download task
+    'extraction': None,   # track extraction task
+    'compression': None,  # track video compression tasks
+    'upload': None        # track upload task
+}
+
 def check_file_command_supports_mime():
     """Checks if the system's 'file' command supports the --mime-type flag."""
     # On some systems like Termux, the 'file' command is older and uses -i.
@@ -142,6 +150,13 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
         logger.warning("ffmpeg not found, skipping video compression")
         return False
     
+    # Store current compression task for cancellation
+    ongoing_operations['compression'] = {
+        'input_path': input_path,
+        'output_path': output_path,
+        'process': None
+    }
+    
     try:
         # Fast MP4 compression settings optimized for Telegram
         # Using ultrafast preset for speed, h264 codec for compatibility
@@ -159,19 +174,24 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
         ]
         
         logger.info(f"Compressing video: {input_path} -> {output_path}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 min timeout
+        # Store process reference for potential cancellation
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ongoing_operations['compression']['process'] = process
         
-        if result.returncode == 0:
+        # Wait for completion
+        stdout, stderr = process.communicate()
+        
+        if process.returncode == 0:
             logger.info(f"Video compression successful: {output_path}")
+            ongoing_operations['compression'] = None
             return True
         else:
-            logger.error(f"Video compression failed: {result.stderr}")
+            logger.error(f"Video compression failed: {stderr.decode()}")
+            ongoing_operations['compression'] = None
             return False
-    except subprocess.TimeoutExpired:
-        logger.error("Video compression timed out")
-        return False
     except Exception as e:
         logger.error(f"Error during video compression: {e}")
+        ongoing_operations['compression'] = None
         return False
 
 async def download_file_parallel(client, document, file_path, chunk_size=1024*1024, max_parallel=4):
@@ -386,6 +406,9 @@ async def process_archive_event(event):
             except Exception:
                 await event.reply(final_txt)
             logger.info(f'Download complete: {temp_archive_path} ({human_size(actual_size)}) elapsed {total_elapsed:.1f}s')
+            
+            # Clear download task
+            ongoing_operations['download'] = None
         except Exception as e:
             logger.error(f'Error downloading {filename}: {e}')
             try:
@@ -398,6 +421,8 @@ async def process_archive_event(event):
                     os.remove(temp_archive_path)
                 except OSError:
                     pass
+            # Clear download task
+            ongoing_operations['download'] = None
             return
 
         # Disk space check
@@ -491,7 +516,7 @@ async def process_archive_event(event):
                     'original_event': event,
                     'hash': file_hash
                 }
-                await event.reply('🔐 Archive requires password. Reply with:\n/pass <password>        — to attempt extraction\n/cancel-password        — to abort and delete file')
+                await event.reply('🔐 Archive requires password. Reply with:\n/pass <password>        — to attempt extraction\n/cancel-password        — to abort and delete file\n/cancel-process         — to cancel entire process and delete all files')
                 return
             else:
                 # Provide a more detailed error to the user
@@ -517,6 +542,9 @@ async def process_archive_event(event):
                 current_processing['status'] = 'uploading'
                 current_processing['total_files'] = len(media_files)
                 current_processing['uploaded_files'] = 0
+            
+            # Track upload task for cancellation
+            ongoing_operations['upload'] = asyncio.current_task()
             
             # Separate images and videos
             image_files = []
@@ -611,6 +639,9 @@ async def process_archive_event(event):
                     pass
             
             await event.reply(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
+            
+            # Clear upload task
+            ongoing_operations['upload'] = None
 
         # Update cache
         if file_hash:
@@ -742,6 +773,9 @@ async def handle_password_command(event, password: str):
                 pass
         
         await event.reply(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
+        
+        # Clear upload task
+        ongoing_operations['upload'] = None
     if file_hash:
         processed_cache[file_hash] = {
             'filename': filename,
@@ -850,6 +884,86 @@ async def handle_cancel_extraction(event):
     
     await event.reply(f'✅ Extraction of "{filename}" has been cancelled.')
 
+async def handle_cancel_process(event):
+    """Cancel the current process and delete any downloaded files"""
+    global current_processing, pending_password, ongoing_operations
+    if not current_processing and not pending_password:
+        await event.reply('ℹ️ No process currently running.')
+        return
+    
+    cancelled_files = []
+    
+    # Cancel any ongoing operations
+    # Cancel download task
+    if ongoing_operations['download']:
+        try:
+            ongoing_operations['download'].cancel()
+        except Exception as e:
+            logger.warning(f'Error cancelling download task: {e}')
+        ongoing_operations['download'] = None
+    
+    # Cancel upload task
+    if ongoing_operations['upload']:
+        try:
+            ongoing_operations['upload'].cancel()
+        except Exception as e:
+            logger.warning(f'Error cancelling upload task: {e}')
+        ongoing_operations['upload'] = None
+    
+    # Terminate video compression process if running
+    if ongoing_operations['compression'] and ongoing_operations['compression'].get('process'):
+        try:
+            process = ongoing_operations['compression']['process']
+            process.terminate()
+            # Wait a bit for graceful termination
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                # Force kill if it doesn't terminate gracefully
+                process.kill()
+        except Exception as e:
+            logger.warning(f'Error terminating compression process: {e}')
+        ongoing_operations['compression'] = None
+    
+    # Cancel any ongoing extraction
+    if current_processing:
+        filename = current_processing.get('filename', 'unknown file')
+        cancelled_files.append(filename)
+        current_processing = None
+    
+    # Cancel any pending password process and clean up files
+    if pending_password:
+        try:
+            archive_path = pending_password['archive_path']
+            extract_path = pending_password['extract_path']
+            filename = pending_password['filename']
+            
+            # Add to cancelled files list
+            cancelled_files.append(filename)
+            
+            # Clean up files
+            shutil.rmtree(extract_path, ignore_errors=True)
+            if os.path.exists(archive_path):
+                os.remove(archive_path)
+        except Exception as e:
+            logger.warning(f'Error during cancel process cleanup: {e}')
+        pending_password = None
+    
+    # Reset all ongoing operations
+    ongoing_operations = {
+        'download': None,
+        'extraction': None,
+        'compression': None,
+        'upload': None
+    }
+    
+    # Create response message
+    if len(cancelled_files) == 1:
+        await event.reply(f'✅ Process for "{cancelled_files[0]}" has been cancelled and files deleted.')
+    else:
+        file_list = ', '.join([f'"{f}"' for f in cancelled_files])
+        await event.reply(f'✅ Processes for {file_list} have been cancelled and files deleted.')
+
 @client.on(events.NewMessage(incoming=True))
 async def watcher(event):
     global pending_password
@@ -876,6 +990,9 @@ async def watcher(event):
             return
         if txt == '/cancel-extraction':
             await handle_cancel_extraction(event)
+            return
+        if txt == '/cancel-process':
+            await handle_cancel_process(event)
             return
         if txt == '/q' or txt == '/queue':
             await handle_queue_command(event)

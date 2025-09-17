@@ -415,6 +415,7 @@ async def process_archive_event(event):
     logger.info(f'Received archive: {filename} size={human_size(size_bytes)}')
     temp_archive_path = os.path.join(DATA_DIR, filename)
     start_download_ts = time.time()
+    chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size (default 1MB for Premium)
     
     # Update current processing status for download phase
     download_status = {

@@ -71,7 +71,8 @@ client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 MAX_ARCHIVE_GB = config.getfloat('DEFAULT', 'MAX_ARCHIVE_GB', fallback=6.0)  # Skip if bigger than this
 DISK_SPACE_FACTOR = config.getfloat('DEFAULT', 'DISK_SPACE_FACTOR', fallback=2.5)  # Need free >= factor * archive size
 MAX_CONCURRENT = config.getint('DEFAULT', 'MAX_CONCURRENT', fallback=1)  # semaphore size
-DOWNLOAD_CHUNK_SIZE_KB = config.getint('DEFAULT', 'DOWNLOAD_CHUNK_SIZE_KB', fallback=512) # Affects download speed
+# For Telegram Premium users, we can use larger chunk sizes (up to 1MB) for better download performance
+DOWNLOAD_CHUNK_SIZE_KB = config.getint('DEFAULT', 'DOWNLOAD_CHUNK_SIZE_KB', fallback=1024) # Increased for Telegram Premium (default: 1024 KB)
 VIDEO_TRANSCODE_THRESHOLD_MB = config.getint('DEFAULT', 'VIDEO_TRANSCODE_THRESHOLD_MB', fallback=100)  # Transcode videos larger than this
 TRANSCODE_ENABLED = config.getboolean('DEFAULT', 'TRANSCODE_ENABLED', fallback=False)  # Enable/disable video transcoding
 
@@ -172,6 +173,58 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
     except Exception as e:
         logger.error(f"Error during video compression: {e}")
         return False
+
+async def download_file_parallel(client, document, file_path, chunk_size=1024*1024, max_parallel=4):
+    """
+    Download a file using parallel chunks for faster downloads, especially for Telegram Premium users.
+    """
+    try:
+        # Get file size
+        file_size = document.size
+        
+        # Open file for writing
+        with open(file_path, 'wb') as f:
+            # Create a list to hold downloaded chunks
+            downloaded_chunks = {}
+            
+            # Download in parallel chunks
+            tasks = []
+            offset = 0
+            
+            while offset < file_size:
+                # Create tasks for parallel downloads
+                current_tasks = []
+                for i in range(max_parallel):
+                    if offset >= file_size:
+                        break
+                    
+                    # Calculate limit (chunk size or remaining bytes)
+                    limit = min(chunk_size, file_size - offset)
+                    
+                    # Create a task for this chunk
+                    task = client.download_file(document, offset=offset, limit=limit)
+                    current_tasks.append((task, offset, limit))
+                    offset += limit
+                
+                # Wait for all current tasks to complete
+                for task, chunk_offset, chunk_limit in current_tasks:
+                    try:
+                        chunk_data = await task
+                        downloaded_chunks[chunk_offset] = chunk_data
+                    except Exception as e:
+                        logger.error(f"Error downloading chunk at offset {chunk_offset}: {e}")
+                        raise
+                
+                # Write completed chunks in order
+                sorted_offsets = sorted(downloaded_chunks.keys())
+                for chunk_offset in sorted_offsets:
+                    f.write(downloaded_chunks[chunk_offset])
+                    del downloaded_chunks[chunk_offset]
+                
+        return file_size
+    except Exception as e:
+        logger.error(f"Error in parallel download: {e}")
+        raise
 
 async def save_cache():
     async with cache_lock:
@@ -313,8 +366,9 @@ async def process_archive_event(event):
                 last_report['last_edit_time'] = now
         try:
             # Use iter_download for more control over chunk size for performance tuning
+            # For Telegram Premium, we can use larger chunks for better performance
             downloaded_bytes = 0
-            chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024
+            chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size (default 1MB for Premium)
             with open(temp_archive_path, 'wb') as f:
                 async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
                     f.write(chunk)

@@ -285,8 +285,8 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
 
 async def download_file_parallel(client, document, file_path, chunk_size=1024*1024, max_parallel=4):
     """
-    Download a file using sequential chunks with larger chunk size for better performance.
-    Note: True parallel downloads are complex with Telethon, so we use larger chunks instead.
+    Download a file sequentially with progress reporting.
+    Uses iter_download for chunked downloads which is the correct Telethon approach.
     """
     try:
         # Get file size
@@ -294,16 +294,9 @@ async def download_file_parallel(client, document, file_path, chunk_size=1024*10
         
         # Open file for writing
         with open(file_path, 'wb') as f:
-            # Download file sequentially but with larger chunks for better performance
-            # Use a larger chunk size (chunk_size * max_parallel) to simulate parallelism benefits
-            effective_chunk_size = chunk_size * max_parallel
-            offset = 0
-            
-            while offset < file_size:
-                limit = min(effective_chunk_size, file_size - offset)
-                chunk = await client.download_file(document, offset=offset, limit=limit)
+            # Use iter_download for chunked downloads - this is the correct Telethon approach
+            async for chunk in client.iter_download(document, chunk_size=chunk_size):
                 f.write(chunk)
-                offset += len(chunk)
         
         return file_size
     except Exception as e:

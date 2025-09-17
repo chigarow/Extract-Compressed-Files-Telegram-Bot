@@ -101,7 +101,7 @@ This feature makes it easier to identify which files came from which archive.
 
 The script includes an optional fast video compression feature that converts all video files to MP4 format optimized for Telegram streaming. This feature:
 
-- Uses the ultrafast encoding preset to minimize processing time
+- Uses compatible ffmpeg settings for proper metadata and duration display
 - Converts all video files regardless of their format or size
 - Optimizes videos for Telegram's streaming capabilities
 

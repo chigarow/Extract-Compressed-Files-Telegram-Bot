@@ -104,6 +104,9 @@ ongoing_operations = {
     'upload': None        # track upload task
 }
 
+# Track cancelled operations by filename to properly interrupt downloads
+cancelled_operations = set()
+
 def check_file_command_supports_mime():
     """Checks if the system's 'file' command supports the --mime-type flag."""
     # On some systems like Termux, the 'file' command is older and uses -i.
@@ -144,54 +147,44 @@ def is_ffmpeg_available():
 def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
     """
     Compress video to MP4 format optimized for Telegram streaming.
-    Uses fast compression settings to minimize processing time.
+    Uses compatible compression settings to ensure proper metadata and streaming.
     """
     if not is_ffmpeg_available():
         logger.warning("ffmpeg not found, skipping video compression")
         return False
     
-    # Store current compression task for cancellation
-    ongoing_operations['compression'] = {
-        'input_path': input_path,
-        'output_path': output_path,
-        'process': None
-    }
-    
     try:
-        # Fast MP4 compression settings optimized for Telegram
-        # Using ultrafast preset for speed, h264 codec for compatibility
+        # More compatible MP4 compression settings optimized for Telegram
+        # Using superfast preset for better compatibility than ultrafast
         cmd = [
             'ffmpeg',
             '-i', input_path,
             '-c:v', 'libx264',
-            '-preset', 'ultrafast',
+            '-preset', 'superfast',  # More compatible than ultrafast
             '-crf', '28',  # Quality setting (lower = better quality, 28 is a good balance)
             '-c:a', 'aac',
             '-b:a', '128k',
             '-movflags', '+faststart',  # Optimize for streaming
+            '-fflags', '+genpts',  # Generate presentation timestamps for proper duration display
+            '-avoid_negative_ts', 'make_zero',  # Fix timing issues
             '-y',  # Overwrite output file
             output_path
         ]
         
         logger.info(f"Compressing video: {input_path} -> {output_path}")
-        # Store process reference for potential cancellation
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        ongoing_operations['compression']['process'] = process
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 min timeout
         
-        # Wait for completion
-        stdout, stderr = process.communicate()
-        
-        if process.returncode == 0:
+        if result.returncode == 0:
             logger.info(f"Video compression successful: {output_path}")
-            ongoing_operations['compression'] = None
             return True
         else:
-            logger.error(f"Video compression failed: {stderr.decode()}")
-            ongoing_operations['compression'] = None
+            logger.error(f"Video compression failed: {result.stderr}")
             return False
+    except subprocess.TimeoutExpired:
+        logger.error("Video compression timed out")
+        return False
     except Exception as e:
         logger.error(f"Error during video compression: {e}")
-        ongoing_operations['compression'] = None
         return False
 
 async def download_file_parallel(client, document, file_path, chunk_size=1024*1024, max_parallel=4):
@@ -391,6 +384,21 @@ async def process_archive_event(event):
             chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size (default 1MB for Premium)
             with open(temp_archive_path, 'wb') as f:
                 async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
+                    # Check if the process has been cancelled
+                    if filename in cancelled_operations:
+                        cancelled_operations.discard(filename)
+                        # Clean up partially downloaded file
+                        if os.path.exists(temp_archive_path):
+                            try:
+                                os.remove(temp_archive_path)
+                            except OSError:
+                                pass
+                        await event.reply(f'❌ Download cancelled: {filename}')
+                        # Clear download task and current processing
+                        ongoing_operations['download'] = None
+                        current_processing = None
+                        return
+                    
                     f.write(chunk)
                     downloaded_bytes += len(chunk)
                     progress(downloaded_bytes, size_bytes)
@@ -886,12 +894,18 @@ async def handle_cancel_extraction(event):
 
 async def handle_cancel_process(event):
     """Cancel the current process and delete any downloaded files"""
-    global current_processing, pending_password, ongoing_operations
+    global current_processing, pending_password, ongoing_operations, cancelled_operations
     if not current_processing and not pending_password:
         await event.reply('ℹ️ No process currently running.')
         return
     
     cancelled_files = []
+    
+    # Add filename to cancelled operations so download loop can check
+    if current_processing and 'filename' in current_processing:
+        filename = current_processing['filename']
+        cancelled_operations.add(filename)
+        cancelled_files.append(filename)
     
     # Cancel any ongoing operations
     # Cancel download task

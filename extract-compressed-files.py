@@ -91,6 +91,7 @@ TRANSCODE_ENABLED = config.getboolean('DEFAULT', 'TRANSCODE_ENABLED', fallback=F
 # FastTelethon parallel download acceleration
 FAST_DOWNLOAD_ENABLED = config.getboolean('DEFAULT', 'FAST_DOWNLOAD_ENABLED', fallback=True)  # Enable FastTelethon parallel downloads
 FAST_DOWNLOAD_CONNECTIONS = config.getint('DEFAULT', 'FAST_DOWNLOAD_CONNECTIONS', fallback=8)  # Number of parallel connections for FastTelethon
+WIFI_ONLY_MODE = config.getboolean('DEFAULT', 'WIFI_ONLY_MODE', fallback=True)  # Only download on WiFi (not mobile data)
 
 # Cache file path
 PROCESSED_CACHE_PATH = os.path.join(DATA_DIR, 'processed_archives.json')
@@ -119,7 +120,8 @@ ongoing_operations = {
     'download': None,     # track download task
     'extraction': None,   # track extraction task
     'compression': None,  # track video compression tasks
-    'upload': None        # track upload task
+    'upload': None,       # track upload task
+    'status': None        # track current status message
 }
 
 # Track cancelled operations by filename to properly interrupt downloads
@@ -474,14 +476,26 @@ async def process_archive_event(event):
                     # Call the original progress function
                     progress(current_bytes, total_bytes)
                 
+                # Network status callbacks
+                def pause_callback(reason):
+                    logger.warning(f"⏸️ Download paused: {reason}")
+                    ongoing_operations['status'] = f"⏸️ Paused: {reason}"
+                
+                def resume_callback(reason):
+                    logger.info(f"▶️ Download resumed: {reason}")
+                    ongoing_operations['status'] = "⬬ Downloading..."
+                
                 try:
-                    # Use FastTelethon parallel download
+                    # Use FastTelethon parallel download with WiFi-only mode
                     await fast_download_to_file(
                         client, 
                         message.document, 
                         temp_archive_path, 
                         progress_callback=fast_progress_callback,
-                        max_connections=FAST_DOWNLOAD_CONNECTIONS
+                        max_connections=FAST_DOWNLOAD_CONNECTIONS,
+                        wifi_only=WIFI_ONLY_MODE,  # Only download on WiFi if configured
+                        pause_callback=pause_callback,
+                        resume_callback=resume_callback
                     )
                     actual_size = downloaded_bytes[0] if downloaded_bytes[0] > 0 else size_bytes
                 except asyncio.CancelledError:

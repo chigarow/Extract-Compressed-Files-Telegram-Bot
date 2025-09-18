@@ -254,29 +254,36 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
     
     try:
         # Enhanced MP4 compression settings optimized for Telegram
-        # These settings ensure proper thumbnail generation and duration display
+        # Fixed thumbnail and duration display issues
         cmd = [
             'ffmpeg',
             '-i', input_path,
             '-c:v', 'libx264',
-            '-preset', 'superfast',  # Faster encoding with good compatibility
-            '-crf', '28',  # Quality setting (lower = better quality, 28 is a good balance)
+            '-preset', 'medium',  # Better quality encoding
+            '-crf', '23',  # Better quality setting for proper thumbnails
             '-c:a', 'aac',
             '-b:a', '128k',
-            '-ar', '44100',  # Standard audio sample rate
-            '-movflags', '+faststart',  # Optimize for streaming (places moov atom at beginning)
-            '-pix_fmt', 'yuv420p',  # Ensures compatibility with Telegram
-            '-profile:v', 'baseline',  # Ensures compatibility with Telegram
-            '-level', '3.0',  # Ensures compatibility with Telegram
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',  # Ensure even dimensions for compatibility
-            '-fflags', '+genpts',  # Generate presentation timestamps for proper duration display
-            '-avoid_negative_ts', 'make_zero',  # Fix timing issues
-            '-metadata', 'title=',  # Clear title metadata to avoid conflicts
-            '-metadata', 'comment=',  # Clear comment metadata to avoid conflicts
-            # Key parameters to fix thumbnail and duration issues:
-            '-g', '50',  # GOP size - ensures keyframes are placed regularly
-            '-keyint_min', '25',  # Minimum GOP size
-            '-sc_threshold', '0',  # Disable scene change detection for fixed GOP
+            '-ar', '48000',  # Higher quality audio sample rate
+            # Critical fixes for thumbnail and duration display:
+            '-movflags', '+faststart+use_metadata_tags',  # Proper metadata handling
+            '-pix_fmt', 'yuv420p',  # Ensures compatibility
+            '-profile:v', 'main',  # Main profile is better than baseline for thumbnails
+            '-level', '4.0',  # Higher level for better compatibility
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',  # Ensure even dimensions
+            # Timestamp and duration fixes:
+            '-copyts',  # Copy input timestamps
+            '-start_at_zero',  # Start timestamps at zero
+            '-avoid_negative_ts', 'disabled',  # Don't modify timestamps
+            '-fflags', '+genpts+igndts',  # Generate PTS and ignore DTS issues
+            # Metadata fixes:
+            '-map_metadata', '0',  # Copy metadata from input
+            '-write_tmcd', '0',  # Disable timecode track that can cause issues
+            # GOP and keyframe settings for proper thumbnails:
+            '-g', '48',  # GOP size matching frame rate
+            '-keyint_min', '24',  # Minimum GOP size
+            '-sc_threshold', '40',  # Allow some scene change detection
+            # Force proper frame rate:
+            '-r', '24',  # Set output frame rate to ensure consistency
             '-y',  # Overwrite output file
             output_path
         ]
@@ -455,15 +462,16 @@ async def process_archive_event(event):
                 logger.info(f'Using FastTelethon parallel download with {FAST_DOWNLOAD_CONNECTIONS} connections')
                 
                 # Create a progress callback that handles cancellation
-                downloaded_bytes = 0
+                downloaded_bytes = [0]  # Use list to allow modification in nested function
                 def fast_progress_callback(current_bytes, total_bytes):
-                    nonlocal downloaded_bytes
-                    downloaded_bytes = current_bytes
+                    # Update downloaded bytes counter
+                    downloaded_bytes[0] = current_bytes
                     
                     # Check if the process has been cancelled
                     if filename in cancelled_operations:
                         raise asyncio.CancelledError("Download cancelled by user")
                     
+                    # Call the original progress function
                     progress(current_bytes, total_bytes)
                 
                 try:
@@ -475,7 +483,7 @@ async def process_archive_event(event):
                         progress_callback=fast_progress_callback,
                         max_connections=FAST_DOWNLOAD_CONNECTIONS
                     )
-                    actual_size = downloaded_bytes
+                    actual_size = downloaded_bytes[0] if downloaded_bytes[0] > 0 else size_bytes
                 except asyncio.CancelledError:
                     cancelled_operations.discard(filename)
                     # Clean up partially downloaded file
@@ -491,7 +499,7 @@ async def process_archive_event(event):
                 except Exception as e:
                     logger.warning(f'FastTelethon download failed: {e}. Falling back to standard download.')
                     # Fall back to standard download on error
-                    downloaded_bytes = 0
+                    downloaded_bytes_fallback = 0
                     chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024
                     with open(temp_archive_path, 'wb') as f:
                         async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
@@ -510,9 +518,9 @@ async def process_archive_event(event):
                                 return
                             
                             f.write(chunk)
-                            downloaded_bytes += len(chunk)
-                            progress(downloaded_bytes, size_bytes)
-                    actual_size = downloaded_bytes
+                            downloaded_bytes_fallback += len(chunk)
+                            progress(downloaded_bytes_fallback, size_bytes)
+                    actual_size = downloaded_bytes_fallback
             else:
                 # Use standard iter_download for small files or when FastTelethon is disabled
                 logger.info(f'Using standard Telethon download (FastTelethon: enabled={FAST_DOWNLOAD_ENABLED}, available={FAST_DOWNLOAD_AVAILABLE}, size={human_size(size_bytes)})')
@@ -554,12 +562,16 @@ async def process_archive_event(event):
             ongoing_operations['download'] = None
             
             # Add to processing queue after download completes
+            logger.info(f'Adding {filename} to processing queue')
             await processing_queue.put(download_status)
             
             # Start the processing task if it's not already running
             global processing_task
             if processing_task is None or processing_task.done():
+                logger.info(f'Starting new processing task for {filename}')
                 processing_task = asyncio.create_task(process_queue())
+            else:
+                logger.info(f'Processing task already running, {filename} added to queue')
                 
     except Exception as e:
         logger.error(f'Error downloading {filename}: {e}')
@@ -583,16 +595,21 @@ async def process_queue():
     while True:
         try:
             # Get the next file to process from the queue
+            logger.info('Processing queue: waiting for next file')
             download_status = await processing_queue.get()
+            filename = download_status.get('filename', 'unknown')
+            logger.info(f'Processing queue: got file {filename}')
             
             # Set as current processing
             current_processing = download_status
             
             # Process the file (extraction, upload, etc.)
+            logger.info(f'Starting extraction and upload for {filename}')
             await process_extract_and_upload(download_status)
             
             # Mark task as done
             processing_queue.task_done()
+            logger.info(f'Processing complete for {filename}')
             
             # Clear current processing
             current_processing = None
@@ -612,8 +629,11 @@ async def process_extract_and_upload(download_status):
     size_bytes = download_status['size']
     message = download_status['message']
     
+    logger.info(f'process_extract_and_upload: Starting processing for {filename}')
+    
     # Update status message
     status_msg = await event.reply(f'⚙️ Processing {filename}...')
+    logger.info(f'process_extract_and_upload: Status message sent for {filename}')
     
     # Disk space check
     try:
@@ -660,6 +680,7 @@ async def process_extract_and_upload(download_status):
         # If the system 'file' command is not compatible, use our manual extension-based logic.
         if not FILE_CMD_OK:
             logger.warning("System 'file' command is not compatible, using manual extension-based extraction.")
+            logger.info(f'Extracting {filename} using manual extension-based extraction')
             ext = os.path.splitext(filename.lower())[1]
             if ext == '.zip':
                 with zipfile.ZipFile(temp_archive_path, 'r') as zf:
@@ -689,7 +710,9 @@ async def process_extract_and_upload(download_status):
             logger.info("System 'file' command is compatible, using patoolib auto-detection.")
             patoolib.extract_archive(temp_archive_path, outdir=extract_path)
 
+        logger.info(f'Extraction completed successfully for {filename}')
         await event.reply('✅ Extraction complete. Scanning media files…')
+        logger.info(f'Starting media files scan for {filename}')
     except (patoolib.util.PatoolError, subprocess.CalledProcessError, zipfile.BadZipFile, tarfile.TarError) as e:
         err_text = str(e)
         # If the error is from a subprocess, add stderr to the message for more context.
@@ -718,11 +741,14 @@ async def process_extract_and_upload(download_status):
             return
 
     # Process media
+    logger.info(f'Scanning for media files in {extract_path}')
     media_files = []
     for root, _, files in os.walk(extract_path):
         for f in files:
             if f.lower().endswith(MEDIA_EXTENSIONS):
                 media_files.append(os.path.join(root, f))
+    
+    logger.info(f'Found {len(media_files)} media files in {filename}')
 
     if not media_files:
         await event.reply('ℹ️ No media files found in archive.')

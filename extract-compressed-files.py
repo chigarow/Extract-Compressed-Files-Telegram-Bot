@@ -30,6 +30,13 @@ from telethon.errors import RPCError
 from math import ceil
 import queue
 
+# Import our FastTelethon parallel download module
+try:
+    from fast_download import fast_download_to_file
+    FAST_DOWNLOAD_AVAILABLE = True
+except ImportError:
+    FAST_DOWNLOAD_AVAILABLE = False
+
 BASE_DIR = os.path.dirname(__file__)
 CONFIG_PATH = os.path.join(BASE_DIR, 'secrets.properties')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -65,6 +72,10 @@ logger.handlers.clear()
 logger.addHandler(stream_h)
 logger.addHandler(file_h)
 
+# Log FastTelethon availability
+if not FAST_DOWNLOAD_AVAILABLE:
+    logger.warning("FastTelethon module not available - download acceleration disabled. Run: pip install cryptg for better performance.")
+
 SESSION_PATH = os.path.join(DATA_DIR, 'session')  # Telethon will append .session
 client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
@@ -77,6 +88,9 @@ DOWNLOAD_CHUNK_SIZE_KB = config.getint('DEFAULT', 'DOWNLOAD_CHUNK_SIZE_KB', fall
 PARALLEL_DOWNLOADS = config.getint('DEFAULT', 'PARALLEL_DOWNLOADS', fallback=4)  # Number of parallel downloads for better speed
 VIDEO_TRANSCODE_THRESHOLD_MB = config.getint('DEFAULT', 'VIDEO_TRANSCODE_THRESHOLD_MB', fallback=100)  # Transcode videos larger than this
 TRANSCODE_ENABLED = config.getboolean('DEFAULT', 'TRANSCODE_ENABLED', fallback=False)  # Enable/disable video transcoding
+# FastTelethon parallel download acceleration
+FAST_DOWNLOAD_ENABLED = config.getboolean('DEFAULT', 'FAST_DOWNLOAD_ENABLED', fallback=True)  # Enable FastTelethon parallel downloads
+FAST_DOWNLOAD_CONNECTIONS = config.getint('DEFAULT', 'FAST_DOWNLOAD_CONNECTIONS', fallback=8)  # Number of parallel connections for FastTelethon
 
 # Cache file path
 PROCESSED_CACHE_PATH = os.path.join(DATA_DIR, 'processed_archives.json')
@@ -436,31 +450,95 @@ async def process_archive_event(event):
                 await event.reply(f'❌ Download cancelled: {filename}')
                 return
                 
-            # Use iter_download for more control over chunk size for performance tuning
-            # For Telegram Premium, we can use larger chunks for better performance
-            downloaded_bytes = 0
-            chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size (default 1MB for Premium)
-            with open(temp_archive_path, 'wb') as f:
-                async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
+            # Choose download method based on configuration and availability
+            if FAST_DOWNLOAD_ENABLED and FAST_DOWNLOAD_AVAILABLE and size_bytes > 10 * 1024 * 1024:  # Use FastTelethon for files > 10MB
+                logger.info(f'Using FastTelethon parallel download with {FAST_DOWNLOAD_CONNECTIONS} connections')
+                
+                # Create a progress callback that handles cancellation
+                downloaded_bytes = 0
+                def fast_progress_callback(current_bytes, total_bytes):
+                    nonlocal downloaded_bytes
+                    downloaded_bytes = current_bytes
+                    
                     # Check if the process has been cancelled
                     if filename in cancelled_operations:
-                        cancelled_operations.discard(filename)
-                        # Clean up partially downloaded file
-                        if os.path.exists(temp_archive_path):
-                            try:
-                                os.remove(temp_archive_path)
-                            except OSError:
-                                pass
-                        await event.reply(f'❌ Download cancelled: {filename}')
-                        # Clear download task
-                        ongoing_operations['download'] = None
-                        return
+                        raise asyncio.CancelledError("Download cancelled by user")
                     
-                    f.write(chunk)
-                    downloaded_bytes += len(chunk)
-                    progress(downloaded_bytes, size_bytes)
-            
-            actual_size = downloaded_bytes
+                    progress(current_bytes, total_bytes)
+                
+                try:
+                    # Use FastTelethon parallel download
+                    await fast_download_to_file(
+                        client, 
+                        message.document, 
+                        temp_archive_path, 
+                        progress_callback=fast_progress_callback,
+                        max_connections=FAST_DOWNLOAD_CONNECTIONS
+                    )
+                    actual_size = downloaded_bytes
+                except asyncio.CancelledError:
+                    cancelled_operations.discard(filename)
+                    # Clean up partially downloaded file
+                    if os.path.exists(temp_archive_path):
+                        try:
+                            os.remove(temp_archive_path)
+                        except OSError:
+                            pass
+                    await event.reply(f'❌ Download cancelled: {filename}')
+                    # Clear download task
+                    ongoing_operations['download'] = None
+                    return
+                except Exception as e:
+                    logger.warning(f'FastTelethon download failed: {e}. Falling back to standard download.')
+                    # Fall back to standard download on error
+                    downloaded_bytes = 0
+                    chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024
+                    with open(temp_archive_path, 'wb') as f:
+                        async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
+                            # Check if the process has been cancelled
+                            if filename in cancelled_operations:
+                                cancelled_operations.discard(filename)
+                                # Clean up partially downloaded file
+                                if os.path.exists(temp_archive_path):
+                                    try:
+                                        os.remove(temp_archive_path)
+                                    except OSError:
+                                        pass
+                                await event.reply(f'❌ Download cancelled: {filename}')
+                                # Clear download task
+                                ongoing_operations['download'] = None
+                                return
+                            
+                            f.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            progress(downloaded_bytes, size_bytes)
+                    actual_size = downloaded_bytes
+            else:
+                # Use standard iter_download for small files or when FastTelethon is disabled
+                logger.info(f'Using standard Telethon download (FastTelethon: enabled={FAST_DOWNLOAD_ENABLED}, available={FAST_DOWNLOAD_AVAILABLE}, size={human_size(size_bytes)})')
+                downloaded_bytes = 0
+                chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size (default 1MB for Premium)
+                with open(temp_archive_path, 'wb') as f:
+                    async for chunk in client.iter_download(message.document, chunk_size=chunk_size):
+                        # Check if the process has been cancelled
+                        if filename in cancelled_operations:
+                            cancelled_operations.discard(filename)
+                            # Clean up partially downloaded file
+                            if os.path.exists(temp_archive_path):
+                                try:
+                                    os.remove(temp_archive_path)
+                                except OSError:
+                                    pass
+                            await event.reply(f'❌ Download cancelled: {filename}')
+                            # Clear download task
+                            ongoing_operations['download'] = None
+                            return
+                        
+                        f.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        progress(downloaded_bytes, size_bytes)
+                
+                actual_size = downloaded_bytes
             total_elapsed = time.time() - start_download_ts
             avg_speed = actual_size / total_elapsed if total_elapsed > 0 else 0
             speed_h = human_size(avg_speed) + '/s'

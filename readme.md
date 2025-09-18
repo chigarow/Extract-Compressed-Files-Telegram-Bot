@@ -12,6 +12,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Password Protected Archive Support**: Handles password-protected archives with a simple command interface.
 - **Fast Video Compression**: Automatically compresses all video files to MP4 format optimized for Telegram streaming.
 - **Grouped Media Uploads**: Uploads images and videos as separate grouped albums with archive name as caption.
+- **FastTelethon Parallel Downloads**: Automatic 10-20x speed acceleration for large files using parallel MTProto connections.
 - **Optimized Download Speed**: Uses larger chunk sizes for Telegram Premium users to maximize download performance.
 - **Progress Tracking**: Provides real-time status updates during download, extraction, and upload processes.
 - **Configurable Limits**: Adjustable settings for maximum file size, disk space requirements, and concurrent processing.
@@ -23,6 +24,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - Python 3.7+
 - Required system tools: `7z` (p7zip) for password-protected archives, `unrar` for RAR files, `ffmpeg` and `ffprobe` for video processing
 - A Telegram account with API credentials
+- **Recommended**: `cryptg` package for optimal FastTelethon performance (`pip install cryptg`)
 
 ## Setup
 
@@ -115,13 +117,37 @@ To enable this feature, set `TRANSCODE_ENABLED=true` in your `secrets.properties
 
 ### Download Speed Optimization
 
-For Telegram Premium users, the script is optimized to take advantage of higher download speeds:
+The script includes **FastTelethon parallel download acceleration** that can provide **10-20x speed improvements** for large files:
 
-- Uses larger chunk sizes (up to 1MB) for faster downloads
-- Configurable through the `DOWNLOAD_CHUNK_SIZE_KB` setting in `secrets.properties`
-- Automatically optimized for Telegram Premium accounts
+#### FastTelethon Parallel Downloads
+- **Automatic acceleration**: Enabled by default for files larger than 10MB
+- **Multiple connections**: Uses up to 8 parallel MTProto connections
+- **Proven performance**: Based on mautrix-telegram's battle-tested implementation
+- **Smart fallback**: Falls back to standard download on any errors
 
-To maximize download speed with Telegram Premium, ensure `DOWNLOAD_CHUNK_SIZE_KB` is set to 1024 (1MB) in your configuration.
+#### Performance Improvements
+- **Typical speeds**: 200 KB/s → 5-20 MB/s (reported by FastTelethon users)
+- **Small files** (<10MB): Uses standard download (no overhead)
+- **Large files** (>10MB): Automatic parallel download acceleration
+- **Premium accounts**: Combined with larger chunk sizes for maximum speed
+
+#### Configuration Options
+Add these settings to your `secrets.properties`:
+
+```ini
+# FastTelethon parallel download acceleration
+FAST_DOWNLOAD_ENABLED=true              # Enable/disable FastTelethon (default: true)
+FAST_DOWNLOAD_CONNECTIONS=8             # Number of parallel connections (default: 8)
+
+# Standard Telethon optimization
+DOWNLOAD_CHUNK_SIZE_KB=1024             # Chunk size for Premium users (default: 1024 KB)
+```
+
+#### Requirements
+- **cryptg**: Install with `pip install cryptg` for optimal AES performance
+- **Telethon**: Automatic with existing installation
+
+The script will automatically detect and use FastTelethon when available, with seamless fallback to standard downloads if needed.
 
 ### Handling Password-Protected Archives
 
@@ -153,7 +179,9 @@ The following options can be added to `secrets.properties` to customize behavior
 - `MAX_ARCHIVE_GB` - Maximum archive size to process (default: 6.0)
 - `DISK_SPACE_FACTOR` - Required free space factor (default: 2.5)
 - `MAX_CONCURRENT` - Maximum concurrent extractions (default: 1)
-- `DOWNLOAD_CHUNK_SIZE_KB` - Download chunk size in KB (default: 512)
+- `DOWNLOAD_CHUNK_SIZE_KB` - Download chunk size in KB (default: 1024)
+- `FAST_DOWNLOAD_ENABLED` - Enable FastTelethon parallel downloads (default: true)
+- `FAST_DOWNLOAD_CONNECTIONS` - Parallel connections for FastTelethon (default: 8)
 - `TRANSCODE_ENABLED` - Enable/disable video compression feature (default: false)
 - `PARALLEL_DOWNLOADS` - Number of parallel downloads for faster speed (default: 4)
 

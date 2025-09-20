@@ -246,7 +246,7 @@ def needs_video_processing(file_path: str) -> bool:
         # If in doubt, process the video
         return True
 
-def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
+async def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
     """
     Compress video to MP4 format optimized for Telegram streaming.
     Uses compatible compression settings to ensure proper metadata, thumbnails, and duration display.
@@ -292,7 +292,8 @@ def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
         ]
         
         logger.info(f"Compressing video: {input_path} -> {output_path}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 min timeout
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=300))  # 5 min timeout
         
         if result.returncode == 0:
             logger.info(f"Video compression successful: {output_path}")
@@ -648,6 +649,44 @@ async def process_queue():
             current_processing = None
             # Continue processing other items in the queue
 
+def extract_archive_async(temp_archive_path, extract_path, filename):
+    logger.info(f'Start extracting {temp_archive_path} -> {extract_path}')
+
+    # If the system 'file' command is not compatible, use our manual extension-based logic.
+    if not FILE_CMD_OK:
+        logger.warning("System 'file' command is not compatible, using manual extension-based extraction.")
+        logger.info(f'Extracting {filename} using manual extension-based extraction')
+        ext = os.path.splitext(filename.lower())[1]
+        if ext == '.zip':
+            with zipfile.ZipFile(temp_archive_path, 'r') as zf:
+                zf.extractall(extract_path)
+        elif ext == '.rar':
+            unrar_cmd = shutil.which('unrar')
+            if unrar_cmd:
+                # We capture output to prevent it from filling up logs unless there's an error.
+                subprocess.run([unrar_cmd, 'x', '-y', temp_archive_path, extract_path + '/'], check=True, capture_output=True)
+            else:
+                raise patoolib.util.PatoolError('RAR extraction failed: unrar command not found')
+        elif ext in ['.7z']:
+            sevenzip = shutil.which('7z') or shutil.which('7za')
+            if sevenzip:
+                subprocess.run([sevenzip, 'x', '-y', f'-o{extract_path}', temp_archive_path], check=True, capture_output=True)
+            else:
+                raise patoolib.util.PatoolError('7z extraction failed: 7z command not found')
+        elif ext in ['.tar', '.gz', '.bz2', '.xz']:
+            with tarfile.open(temp_archive_path, 'r:*') as tf:
+                tf.extractall(extract_path)
+        else:
+            # If we don't have a manual handler, try patoolib and let it raise an error.
+            logger.warning(f"No manual handler for '{ext}', trying patoolib as a last resort.")
+            patoolib.extract_archive(temp_archive_path, outdir=extract_path)
+    else:
+        # This is the normal path where the 'file' command is compatible.
+        logger.info("System 'file' command is compatible, using patoolib auto-detection.")
+        patoolib.extract_archive(temp_archive_path, outdir=extract_path)
+
+    logger.info(f'Extraction completed successfully for {filename}')
+
 async def process_extract_and_upload(download_status):
     """Process the extraction and upload phases for a downloaded file"""
     event = download_status['event']
@@ -702,42 +741,8 @@ async def process_extract_and_upload(download_status):
 
     # Attempt extraction
     try:
-        logger.info(f'Start extracting {temp_archive_path} -> {extract_path}')
-
-        # If the system 'file' command is not compatible, use our manual extension-based logic.
-        if not FILE_CMD_OK:
-            logger.warning("System 'file' command is not compatible, using manual extension-based extraction.")
-            logger.info(f'Extracting {filename} using manual extension-based extraction')
-            ext = os.path.splitext(filename.lower())[1]
-            if ext == '.zip':
-                with zipfile.ZipFile(temp_archive_path, 'r') as zf:
-                    zf.extractall(extract_path)
-            elif ext == '.rar':
-                unrar_cmd = shutil.which('unrar')
-                if unrar_cmd:
-                    # We capture output to prevent it from filling up logs unless there's an error.
-                    subprocess.run([unrar_cmd, 'x', '-y', temp_archive_path, extract_path + '/'], check=True, capture_output=True)
-                else:
-                    raise patoolib.util.PatoolError('RAR extraction failed: unrar command not found')
-            elif ext in ['.7z']:
-                sevenzip = shutil.which('7z') or shutil.which('7za')
-                if sevenzip:
-                    subprocess.run([sevenzip, 'x', '-y', f'-o{extract_path}', temp_archive_path], check=True, capture_output=True)
-                else:
-                    raise patoolib.util.PatoolError('7z extraction failed: 7z command not found')
-            elif ext in ['.tar', '.gz', '.bz2', '.xz']:
-                with tarfile.open(temp_archive_path, 'r:*') as tf:
-                    tf.extractall(extract_path)
-            else:
-                # If we don't have a manual handler, try patoolib and let it raise an error.
-                logger.warning(f"No manual handler for '{ext}', trying patoolib as a last resort.")
-                patoolib.extract_archive(temp_archive_path, outdir=extract_path)
-        else:
-            # This is the normal path where the 'file' command is compatible.
-            logger.info("System 'file' command is compatible, using patoolib auto-detection.")
-            patoolib.extract_archive(temp_archive_path, outdir=extract_path)
-
-        logger.info(f'Extraction completed successfully for {filename}')
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, extract_archive_async, temp_archive_path, extract_path, filename)
         await event.reply('✅ Extraction complete. Scanning media files…')
         logger.info(f'Starting media files scan for {filename}')
     except (patoolib.util.PatoolError, subprocess.CalledProcessError, zipfile.BadZipFile, tarfile.TarError) as e:
@@ -838,7 +843,7 @@ async def process_extract_and_upload(download_status):
                     if TRANSCODE_ENABLED and needs_video_processing(path):
                         # Compress all video files to MP4 format for better Telegram streaming
                         compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
-                        if compress_video_for_telegram(path, compressed_path):
+                        if await compress_video_for_telegram(path, compressed_path):
                             # Validate compressed video as well
                             compressed_info = validate_video_file(compressed_path)
                             # If compression is successful, add the compressed file to the list
@@ -919,7 +924,8 @@ async def handle_password_command(event, password: str):
     file_hash = pending_password['hash']
     await event.reply('🔄 Attempting password extraction...')
     try:
-        extract_with_password(archive_path, extract_path, password)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, extract_with_password, archive_path, extract_path, password)
         await event.reply('✅ Password extraction successful. Scanning media files…')
     except Exception as e:
         await event.reply(f'❌ Password extraction failed: {e}')
@@ -981,7 +987,7 @@ async def handle_password_command(event, password: str):
                 if TRANSCODE_ENABLED and needs_video_processing(path):
                     # Compress all video files to MP4 format for better Telegram streaming
                     compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
-                    if compress_video_for_telegram(path, compressed_path):
+                    if await compress_video_for_telegram(path, compressed_path):
                         # Validate compressed video as well
                         compressed_info = validate_video_file(compressed_path)
                         # If compression is successful, add the compressed file to the list

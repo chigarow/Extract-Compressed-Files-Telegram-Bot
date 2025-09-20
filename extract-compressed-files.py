@@ -1175,16 +1175,35 @@ async def handle_help_command(event):
 
 async def handle_status_command(event):
     """Show a comprehensive status of the bot and system"""
-    
+
     # System Usage
-    cpu_usage = psutil.cpu_percent()
-    mem_info = psutil.virtual_memory()
-    disk_info = psutil.disk_usage(DATA_DIR)
-    
+    try:
+        cpu_usage = psutil.cpu_percent()
+        cpu_status = f"{cpu_usage}%"
+    except PermissionError:
+        cpu_status = "N/A (permission denied)"
+    except Exception as e:
+        logger.warning(f"Could not get CPU usage: {e}")
+        cpu_status = "N/A (error)"
+
+    try:
+        mem_info = psutil.virtual_memory()
+        mem_status = f"{mem_info.percent}% ({human_size(mem_info.used)} / {human_size(mem_info.total)})"
+    except Exception as e:
+        logger.warning(f"Could not get memory usage: {e}")
+        mem_status = "N/A"
+
+    try:
+        disk_info = psutil.disk_usage(DATA_DIR)
+        disk_status = f"{disk_info.percent}% ({human_size(disk_info.used)} / {human_size(disk_info.total)})"
+    except Exception as e:
+        logger.warning(f"Could not get disk usage: {e}")
+        disk_status = "N/A"
+
     # Bot Status
     uptime = datetime.now() - start_time
     log_size = os.path.getsize(LOG_FILE) if os.path.exists(LOG_FILE) else 0
-    
+
     # Configuration
     config_status = (
         f"**Max Archive Size:** {config.max_archive_gb} GB\n"
@@ -1193,19 +1212,19 @@ async def handle_status_command(event):
         f"**WiFi-Only Mode:** {'Enabled' if config.wifi_only_mode else 'Disabled'}\n"
         f"**Video Transcoding:** {'Enabled' if config.transcode_enabled else 'Disabled'}"
     )
-    
+
     status_message = (
         f"**🤖 Bot Status**\n"
         f"Uptime: {str(uptime).split('.')[0]}\n"
         f"Log Size: {human_size(log_size)}\n\n"
         f"**🖥️ System Usage**\n"
-        f"CPU: {cpu_usage}%\n"
-        f"Memory: {mem_info.percent}% ({human_size(mem_info.used)} / {human_size(mem_info.total)})\n"
-        f"Disk: {disk_info.percent}% ({human_size(disk_info.used)} / {human_size(disk_info.total)})\n\n"
+        f"CPU: {cpu_status}\n"
+        f"Memory: {mem_status}\n"
+        f"Disk: {disk_status}\n\n"
         f"**⚙️ Configuration**\n"
         f"{config_status}"
     )
-    
+
     await event.reply(status_message)
 
 async def handle_queue_command(event):

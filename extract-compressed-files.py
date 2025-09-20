@@ -24,6 +24,7 @@ import time
 import subprocess
 import zipfile
 import tarfile
+import sys
 from logging.handlers import RotatingFileHandler
 from telethon import TelegramClient, events
 from telethon.errors import RPCError
@@ -34,6 +35,11 @@ from datetime import datetime, timedelta
 
 # Bot start time
 start_time = datetime.now()
+
+# Add the script's directory to the Python path to ensure modules can be found
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
 
 # Import our FastTelethon parallel download module
 try:

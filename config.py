@@ -59,7 +59,7 @@ class Config:
     def _getboolean(self, key, fallback=None):
         try:
             return self._config.getboolean('DEFAULT', key)
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, configparser.NoOptionError):
             val = self._config.get('DEFAULT', key, fallback=fallback)
             if isinstance(val, bool):
                 return val

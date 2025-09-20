@@ -29,6 +29,11 @@ from telethon import TelegramClient, events
 from telethon.errors import RPCError
 from math import ceil
 import queue
+import psutil
+from datetime import datetime, timedelta
+
+# Bot start time
+start_time = datetime.now()
 
 # Import our FastTelethon parallel download module
 try:
@@ -37,17 +42,15 @@ try:
 except ImportError:
     FAST_DOWNLOAD_AVAILABLE = False
 
+from config import config
+
 BASE_DIR = os.path.dirname(__file__)
-CONFIG_PATH = os.path.join(BASE_DIR, 'secrets.properties')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 os.makedirs(DATA_DIR, exist_ok=True)
 
-config = configparser.ConfigParser()
-config.read(CONFIG_PATH)
-
-API_ID = config.getint('DEFAULT', 'APP_API_ID', fallback=None)
-API_HASH = config.get('DEFAULT', 'APP_API_HASH', fallback=None)
-TARGET_USERNAME = config.get('DEFAULT', 'ACCOUNT_B_USERNAME', fallback=None)
+API_ID = config.api_id
+API_HASH = config.api_hash
+TARGET_USERNAME = config.target_username
 
 if not API_ID or not API_HASH:
     raise RuntimeError('APP_API_ID / APP_API_HASH missing in secrets.properties')
@@ -80,18 +83,16 @@ SESSION_PATH = os.path.join(DATA_DIR, 'session')  # Telethon will append .sessio
 client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 # --- CONFIGURABLE LIMITS (read from config; defaults tuned for Termux device) ---
-MAX_ARCHIVE_GB = config.getfloat('DEFAULT', 'MAX_ARCHIVE_GB', fallback=6.0)  # Skip if bigger than this
-DISK_SPACE_FACTOR = config.getfloat('DEFAULT', 'DISK_SPACE_FACTOR', fallback=2.5)  # Need free >= factor * archive size
-MAX_CONCURRENT = config.getint('DEFAULT', 'MAX_CONCURRENT', fallback=1)  # semaphore size
-# For Telegram Premium users, we can use larger chunk sizes (up to 1MB) for better download performance
-DOWNLOAD_CHUNK_SIZE_KB = config.getint('DEFAULT', 'DOWNLOAD_CHUNK_SIZE_KB', fallback=1024) # Increased for Telegram Premium (default: 1024 KB)
-PARALLEL_DOWNLOADS = config.getint('DEFAULT', 'PARALLEL_DOWNLOADS', fallback=4)  # Number of parallel downloads for better speed
-VIDEO_TRANSCODE_THRESHOLD_MB = config.getint('DEFAULT', 'VIDEO_TRANSCODE_THRESHOLD_MB', fallback=100)  # Transcode videos larger than this
-TRANSCODE_ENABLED = config.getboolean('DEFAULT', 'TRANSCODE_ENABLED', fallback=False)  # Enable/disable video transcoding
-# FastTelethon parallel download acceleration
-FAST_DOWNLOAD_ENABLED = config.getboolean('DEFAULT', 'FAST_DOWNLOAD_ENABLED', fallback=True)  # Enable FastTelethon parallel downloads
-FAST_DOWNLOAD_CONNECTIONS = config.getint('DEFAULT', 'FAST_DOWNLOAD_CONNECTIONS', fallback=8)  # Number of parallel connections for FastTelethon
-WIFI_ONLY_MODE = config.getboolean('DEFAULT', 'WIFI_ONLY_MODE', fallback=True)  # Only download on WiFi (not mobile data)
+MAX_ARCHIVE_GB = config.max_archive_gb
+DISK_SPACE_FACTOR = config.disk_space_factor
+MAX_CONCURRENT = config.max_concurrent
+DOWNLOAD_CHUNK_SIZE_KB = config.download_chunk_size_kb
+PARALLEL_DOWNLOADS = config.parallel_downloads
+VIDEO_TRANSCODE_THRESHOLD_MB = config.video_transcode_threshold_mb
+TRANSCODE_ENABLED = config.transcode_enabled
+FAST_DOWNLOAD_ENABLED = config.fast_download_enabled
+FAST_DOWNLOAD_CONNECTIONS = config.fast_download_connections
+WIFI_ONLY_MODE = config.wifi_only_mode
 
 # Cache file path
 PROCESSED_CACHE_PATH = os.path.join(DATA_DIR, 'processed_archives.json')
@@ -587,6 +588,18 @@ async def process_archive_event(event):
             else:
                 logger.info(f'Processing task already running, {filename} added to queue')
                 
+    except FloodWaitError as e:
+        logger.error(f'Flood wait error: {e}')
+        try:
+            await status_msg.edit(f'❌ Flood wait error: Please wait for {e.seconds} seconds.')
+        except Exception:
+            await event.reply(f'❌ Flood wait error: Please wait for {e.seconds} seconds.')
+    except FileReferenceExpiredError:
+        logger.error('File reference expired. The user needs to send the file again.')
+        try:
+            await status_msg.edit('❌ File reference expired. Please send the file again.')
+        except Exception:
+            await event.reply('❌ File reference expired. Please send the file again.')
     except Exception as e:
         logger.error(f'Error downloading {filename}: {e}')
         try:
@@ -1036,20 +1049,16 @@ async def handle_max_concurrent_command(event, value: int):
     
     # Update the configuration file
     try:
-        # Read the current config
-        config = configparser.ConfigParser()
-        config.read(CONFIG_PATH)
+        # Update the MAX_CONCURRENT value
+        if 'DEFAULT' not in config._config:
+            config._config['DEFAULT'] = {}
+        config._config['DEFAULT']['MAX_CONCURRENT'] = str(value)
         
-        # Update or add the MAX_CONCURRENT value
-        if 'DEFAULT' not in config:
-            config['DEFAULT'] = {}
-        config['DEFAULT']['MAX_CONCURRENT'] = str(value)
-        
-        # Write back to the file
-        with open(CONFIG_PATH, 'w') as configfile:
-            config.write(configfile)
+        # Save the configuration
+        config.save()
         
         # Update the global variable
+        config.max_concurrent = value
         MAX_CONCURRENT = value
         
         # Create a new semaphore with the new value
@@ -1059,6 +1068,133 @@ async def handle_max_concurrent_command(event, value: int):
     except Exception as e:
         logger.error(f"Error updating max_concurrent: {e}")
         await event.reply(f'❌ Failed to update maximum concurrent downloads: {e}')
+
+async def handle_set_max_archive_gb_command(event, value: float):
+    """Handle the /set_max_archive_gb command to change the maximum archive size"""
+    global MAX_ARCHIVE_GB
+    
+    try:
+        if 'DEFAULT' not in config._config:
+            config._config['DEFAULT'] = {}
+        config._config['DEFAULT']['MAX_ARCHIVE_GB'] = str(value)
+        config.save()
+        config.max_archive_gb = value
+        MAX_ARCHIVE_GB = value
+        await event.reply(f'✅ Maximum archive size set to {value} GB.')
+    except Exception as e:
+        logger.error(f"Error updating max_archive_gb: {e}")
+        await event.reply(f'❌ Failed to update maximum archive size: {e}')
+
+async def handle_toggle_fast_download_command(event):
+    """Handle the /toggle_fast_download command to enable/disable fast download"""
+    global FAST_DOWNLOAD_ENABLED
+    
+    try:
+        new_value = not config.fast_download_enabled
+        if 'DEFAULT' not in config._config:
+            config._config['DEFAULT'] = {}
+        config._config['DEFAULT']['FAST_DOWNLOAD_ENABLED'] = str(new_value)
+        config.save()
+        config.fast_download_enabled = new_value
+        FAST_DOWNLOAD_ENABLED = new_value
+        status = "Enabled" if new_value else "Disabled"
+        await event.reply(f'✅ Fast download {status}.')
+    except Exception as e:
+        logger.error(f"Error updating fast_download_enabled: {e}")
+        await event.reply(f'❌ Failed to update fast download setting: {e}')
+
+async def handle_toggle_wifi_only_command(event):
+    """Handle the /toggle_wifi_only command to enable/disable wifi only mode"""
+    global WIFI_ONLY_MODE
+    
+    try:
+        new_value = not config.wifi_only_mode
+        if 'DEFAULT' not in config._config:
+            config._config['DEFAULT'] = {}
+        config._config['DEFAULT']['WIFI_ONLY_MODE'] = str(new_value)
+        config.save()
+        config.wifi_only_mode = new_value
+        WIFI_ONLY_MODE = new_value
+        status = "Enabled" if new_value else "Disabled"
+        await event.reply(f'✅ WiFi-Only mode {status}.')
+    except Exception as e:
+        logger.error(f"Error updating wifi_only_mode: {e}")
+        await event.reply(f'❌ Failed to update WiFi-Only mode setting: {e}')
+
+async def handle_toggle_transcoding_command(event):
+    """Handle the /toggle_transcoding command to enable/disable video transcoding"""
+    global TRANSCODE_ENABLED
+    
+    try:
+        new_value = not config.transcode_enabled
+        if 'DEFAULT' not in config._config:
+            config._config['DEFAULT'] = {}
+        config._config['DEFAULT']['TRANSCODE_ENABLED'] = str(new_value)
+        config.save()
+        config.transcode_enabled = new_value
+        TRANSCODE_ENABLED = new_value
+        status = "Enabled" if new_value else "Disabled"
+        await event.reply(f'✅ Video transcoding {status}.')
+    except Exception as e:
+        logger.error(f"Error updating transcode_enabled: {e}")
+        await event.reply(f'❌ Failed to update video transcoding setting: {e}')
+
+async def handle_help_command(event):
+    """Show a list of all available commands"""
+    help_message = (
+        f"**Available Commands**\n\n"
+        f"**/help** - Show this help message\n"
+        f"**/status** - Show the current status of the bot\n"
+        f"**/q** or **/queue** - Show the current processing queue\n"
+        f"**/pass <password>** - Provide the password for a protected archive\n"
+        f"**/cancel-password** - Cancel password input for a protected archive\n"
+        f"**/cancel-extraction** - Cancel the current extraction process\n"
+        f"**/cancel-process** - Cancel the current process and delete any downloaded files\n"
+        f"**/max_concurrent <number>** - Set the maximum concurrent downloads (e.g., /max_concurrent 3)\n"
+        f"**/set_max_archive_gb <number>** - Set the maximum archive size in GB (e.g., /set_max_archive_gb 10.5)\n"
+        f"**/toggle_fast_download** - Enable/disable fast download\n"
+        f"**/toggle_wifi_only** - Enable/disable WiFi-Only mode\n"
+        f"**/toggle_transcoding** - Enable/disable video transcoding\n"
+    )
+    await event.reply(help_message)
+
+
+
+
+async def handle_status_command(event):
+    """Show a comprehensive status of the bot and system"""
+    
+    # System Usage
+    cpu_usage = psutil.cpu_percent()
+    mem_info = psutil.virtual_memory()
+    disk_info = psutil.disk_usage(DATA_DIR)
+    
+    # Bot Status
+    uptime = datetime.now() - start_time
+    log_size = os.path.getsize(LOG_FILE) if os.path.exists(LOG_FILE) else 0
+    
+    # Configuration
+    config_status = (
+        f"**Max Archive Size:** {config.max_archive_gb} GB\n"
+        f"**Max Concurrent Downloads:** {config.max_concurrent}\n"
+        f"**Fast Download:** {'Enabled' if config.fast_download_enabled else 'Disabled'}\n"
+        f"**WiFi-Only Mode:** {'Enabled' if config.wifi_only_mode else 'Disabled'}\n"
+        f"**Video Transcoding:** {'Enabled' if config.transcode_enabled else 'Disabled'}"
+    )
+    
+    status_message = (
+        f"**🤖 Bot Status**\n"
+        f"Uptime: {str(uptime).split('.')[0]}\n"
+        f"Log Size: {human_size(log_size)}\n\n"
+        f"**🖥️ System Usage**\n"
+        f"CPU: {cpu_usage}%\n"
+        f"Memory: {mem_info.percent}% ({human_size(mem_info.used)} / {human_size(mem_info.total)})\n"
+        f"Disk: {disk_info.percent}% ({human_size(disk_info.used)} / {human_size(disk_info.total)})\n\n"
+        f"**⚙️ Configuration**\n"
+        f"{config_status}"
+    )
+    
+    await event.reply(status_message)
 
 async def handle_queue_command(event):
     """Show current processing status and queue information"""
@@ -1270,6 +1406,9 @@ async def watcher(event):
         if txt == '/q' or txt == '/queue':
             await handle_queue_command(event)
             return
+        if txt == '/status':
+            await handle_status_command(event)
+            return
         if txt.startswith('/max_concurrent '):
             try:
                 value = int(txt.split()[1])
@@ -1279,6 +1418,28 @@ async def watcher(event):
                     await event.reply('❌ Please provide a positive integer value for max concurrent downloads.')
             except (ValueError, IndexError):
                 await event.reply('❌ Usage: /max_concurrent <number> (e.g., /max_concurrent 3)')
+            return
+        if txt.startswith('/set_max_archive_gb '):
+            try:
+                value = float(txt.split()[1])
+                if value > 0:
+                    await handle_set_max_archive_gb_command(event, value)
+                else:
+                    await event.reply('❌ Please provide a positive float value for max archive size.')
+            except (ValueError, IndexError):
+                await event.reply('❌ Usage: /set_max_archive_gb <number> (e.g., /set_max_archive_gb 10.5)')
+            return
+        if txt == '/toggle_fast_download':
+            await handle_toggle_fast_download_command(event)
+            return
+        if txt == '/toggle_wifi_only':
+            await handle_toggle_wifi_only_command(event)
+            return
+        if txt == '/toggle_transcoding':
+            await handle_toggle_transcoding_command(event)
+            return
+        if txt == '/help':
+            await handle_help_command(event)
             return
 
     # If a document & archive extension & not waiting for password (or waiting but new one arrives -> process anyway after) 

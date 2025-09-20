@@ -836,35 +836,35 @@ async def process_extract_and_upload(download_status):
                         await event.reply(f'Error sending {os.path.basename(path)}: {e}')
         
         # Upload videos as a group
-            video_files_to_send = []
-            compressed_video_paths = []  # Keep track of compressed files for cleanup
-            
-            for path in video_files:
-                ext = os.path.splitext(path)[1].lower()
-                try:
-                    # Validate video file before processing
-                    video_info = validate_video_file(path)
-                    
-                    # Check if video needs processing
-                    if TRANSCODE_ENABLED and needs_video_processing(path):
-                        # Compress all video files to MP4 format for better Telegram streaming
-                        compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
-                        if await compress_video_for_telegram(path, compressed_path):
-                            # Validate compressed video as well
-                            compressed_info = validate_video_file(compressed_path)
-                            # If compression is successful, add the compressed file to the list
-                            video_files_to_send.append(compressed_path)
-                            compressed_video_paths.append(compressed_path)
-                        else:
-                            # If compression fails, add the original file
-                            video_files_to_send.append(path)
+        video_files_to_send = []
+        compressed_video_paths = []  # Keep track of compressed files for cleanup
+        
+        for path in video_files:
+            ext = os.path.splitext(path)[1].lower()
+            try:
+                # Validate video file before processing
+                video_info = validate_video_file(path)
+                
+                # Check if video needs processing
+                if TRANSCODE_ENABLED and needs_video_processing(path):
+                    # Compress all video files to MP4 format for better Telegram streaming
+                    compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
+                    if await compress_video_for_telegram(path, compressed_path):
+                        # Validate compressed video as well
+                        compressed_info = validate_video_file(compressed_path)
+                        # If compression is successful, add the compressed file to the list
+                        video_files_to_send.append(compressed_path)
+                        compressed_video_paths.append(compressed_path)
                     else:
-                        # Add videos as-is when compression is disabled or not needed
+                        # If compression fails, add the original file
                         video_files_to_send.append(path)
-                except Exception as e:
-                    logger.error(f'Error preparing video {path}: {e}')
-                    # Add the original file if there's an error in preparation
+                else:
+                    # Add videos as-is when compression is disabled or not needed
                     video_files_to_send.append(path)
+            except Exception as e:
+                logger.error(f'Error preparing video {path}: {e}')
+                # Add the original file if there's an error in preparation
+                video_files_to_send.append(path)
         
         # Send videos as a group
         if video_files_to_send:

@@ -816,10 +816,36 @@ async def process_extract_and_upload(download_status):
         target = await ensure_target_entity()
         sent = 0
         
+        # --- Upload Progress Tracking ---
+        upload_status_msg = await event.reply('Starting upload...')
+        
+        def create_progress_callback(file_type):
+            start_time = time.time()
+            last_edit_pct = [-5]  # Use a list to be mutable in inner scope
+            last_edit_time = [0]
+
+            async def upload_progress(current, total):
+                pct = int(current * 100 / total) if total > 0 else 0
+                now = time.time()
+
+                elapsed = now - start_time
+                speed = current / elapsed if elapsed > 0 else 0
+                eta = (total - current) / speed if speed > 0 else float('inf')
+
+                if (pct >= last_edit_pct[0] + 5) or ((now - last_edit_time[0]) > 5):
+                    txt = f'📤 Uploading {file_type}: {pct}% | {human_size(speed)}/s | ETA: {format_eta(eta)}'
+                    try:
+                        await upload_status_msg.edit(txt)
+                    except:
+                        pass
+                    last_edit_pct[0] = pct
+                    last_edit_time[0] = now
+            return upload_progress
+
         # Upload images first as a group
         if image_files:
             try:
-                await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True)
+                await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True, progress_callback=create_progress_callback("images"))
                 sent += len(image_files)
                 download_status['uploaded_files'] = sent
                 logger.info(f'Sent {len(image_files)} images as group')
@@ -828,7 +854,7 @@ async def process_extract_and_upload(download_status):
                 # Fallback to individual uploads if group upload fails
                 for path in image_files:
                     try:
-                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
+                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
                         sent += 1
                         download_status['uploaded_files'] = sent
                     except Exception as e:
@@ -869,7 +895,7 @@ async def process_extract_and_upload(download_status):
         # Send videos as a group
         if video_files_to_send:
             try:
-                await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True)
+                await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True, progress_callback=create_progress_callback("videos"))
                 sent += len(video_files_to_send)
                 download_status['uploaded_files'] = sent
                 logger.info(f'Sent {len(video_files_to_send)} videos as group')
@@ -879,7 +905,7 @@ async def process_extract_and_upload(download_status):
                 for i, path in enumerate(video_files_to_send):
                     original_path = video_files[i]  # Get the original path for error messages
                     try:
-                        await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False)
+                        await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
                         sent += 1
                         download_status['uploaded_files'] = sent
                     except Exception as e:
@@ -893,7 +919,7 @@ async def process_extract_and_upload(download_status):
             except:
                 pass
         
-        await event.reply(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
+        await upload_status_msg.edit(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
         
         # Clear upload task
         ongoing_operations['upload'] = None
@@ -963,10 +989,36 @@ async def handle_password_command(event, password: str):
         sent = 0
         await event.reply(f'📤 Found {len(media_files)} media files ({len(image_files)} images, {len(video_files)} videos). Uploading...')
         
+        # --- Upload Progress Tracking ---
+        upload_status_msg = await event.reply('Starting upload...')
+        
+        def create_progress_callback(file_type):
+            start_time = time.time()
+            last_edit_pct = [-5]
+            last_edit_time = [0]
+
+            async def upload_progress(current, total):
+                pct = int(current * 100 / total) if total > 0 else 0
+                now = time.time()
+
+                elapsed = now - start_time
+                speed = current / elapsed if elapsed > 0 else 0
+                eta = (total - current) / speed if speed > 0 else float('inf')
+
+                if (pct >= last_edit_pct[0] + 5) or ((now - last_edit_time[0]) > 5):
+                    txt = f'📤 Uploading {file_type}: {pct}% | {human_size(speed)}/s | ETA: {format_eta(eta)}'
+                    try:
+                        await upload_status_msg.edit(txt)
+                    except:
+                        pass
+                    last_edit_pct[0] = pct
+                    last_edit_time[0] = now
+            return upload_progress
+
         # Upload images first as a group
         if image_files:
             try:
-                await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True)
+                await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True, progress_callback=create_progress_callback("images"))
                 sent += len(image_files)
                 logger.info(f'Sent {len(image_files)} images as group')
             except Exception as e:
@@ -974,7 +1026,7 @@ async def handle_password_command(event, password: str):
                 # Fallback to individual uploads if group upload fails
                 for path in image_files:
                     try:
-                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False)
+                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
                         sent += 1
                     except Exception as e:
                         await event.reply(f'Error sending {os.path.basename(path)}: {e}')
@@ -1013,7 +1065,7 @@ async def handle_password_command(event, password: str):
         # Send videos as a group
         if video_files_to_send:
             try:
-                await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True)
+                await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True, progress_callback=create_progress_callback("videos"))
                 sent += len(video_files_to_send)
                 logger.info(f'Sent {len(video_files_to_send)} videos as group')
             except Exception as e:
@@ -1022,7 +1074,7 @@ async def handle_password_command(event, password: str):
                 for i, path in enumerate(video_files_to_send):
                     original_path = video_files[i]  # Get the original path for error messages
                     try:
-                        await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False)
+                        await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
                         sent += 1
                     except Exception as e:
                         await event.reply(f'Error sending {os.path.basename(original_path)}: {e}')
@@ -1034,7 +1086,7 @@ async def handle_password_command(event, password: str):
             except:
                 pass
         
-        await event.reply(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
+        await upload_status_msg.edit(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
         
         # Clear upload task
         ongoing_operations['upload'] = None

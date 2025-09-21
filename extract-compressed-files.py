@@ -751,7 +751,7 @@ async def process_extract_and_upload(download_status):
         await loop.run_in_executor(None, extract_archive_async, temp_archive_path, extract_path, filename)
         await event.reply('✅ Extraction complete. Scanning media files…')
         logger.info(f'Starting media files scan for {filename}')
-    except (patoolib.util.PatoolError, subprocess.CalledProcessError, zipfile.BadZipFile, tarfile.TarError) as e:
+    except (patoolib.util.PatoolError, subprocess.CalledProcessError, zipfile.BadZipFile, tarfile.TarError, RuntimeError) as e:
         err_text = str(e)
         # If the error is from a subprocess, add stderr to the message for more context.
         if hasattr(e, 'stderr') and e.stderr:

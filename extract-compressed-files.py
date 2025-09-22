@@ -1209,6 +1209,7 @@ async def handle_help_command(event):
         f"**Available Commands**\n\n"
         f"**/help** - Show this help message\n"
         f"**/status** - Show the current status of the bot\n"
+        f"**/battery-status** - Show the battery status (Termux only)\n"
         f"**/q** or **/queue** - Show the current processing queue\n"
         f"**/pass <password>** - Provide the password for a protected archive\n"
         f"**/cancel-password** - Cancel password input for a protected archive\n"
@@ -1223,6 +1224,50 @@ async def handle_help_command(event):
     await event.reply(help_message)
 
 
+async def handle_battery_status_command(event):
+    """Show battery status using termux-battery-status"""
+    try:
+        # Check if termux-battery-status is available
+        if not shutil.which('termux-battery-status'):
+            await event.reply('❌ `termux-battery-status` command not found. This command is only available on Termux.')
+            return
+
+        result = subprocess.run(['termux-battery-status'], capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            import json
+            try:
+                status = json.loads(result.stdout)
+                percentage = status.get('percentage', 'N/A')
+                plugged = status.get('plugged', 'N/A')
+                health = status.get('health', 'N/A')
+                status_str = status.get('status', 'N/A')
+                temp = status.get('temperature', 'N/A')
+                current = status.get('current')
+
+                current_str = "N/A"
+                if current is not None:
+                    # The value is in microamperes (µA). Convert to milliamperes (mA).
+                    current_ma = current / 1000
+                    current_str = f"{current_ma:.2f} mA"
+                
+                message = (
+                    f"**🔋 Battery Status**\n\n"
+                    f"**Percentage:** {percentage}%\n"
+                    f"**Status:** {status_str}\n"
+                    f"**Plugged in:** {plugged}\n"
+                    f"**Health:** {health}\n"
+                    f"**Temperature:** {temp}°C\n"
+                    f"**Current:** {current_str}"
+                )
+                await event.reply(message)
+            except json.JSONDecodeError:
+                await event.reply(f"❌ Failed to parse battery status output:\n\n`{result.stdout}`")
+        else:
+            await event.reply(f"❌ Error getting battery status:\n\n`{result.stderr}`")
+    except Exception as e:
+        logger.error(f"Error in handle_battery_status_command: {e}")
+        await event.reply(f"❌ An error occurred while fetching battery status: {e}")
 
 
 async def handle_status_command(event):
@@ -1491,6 +1536,9 @@ async def watcher(event):
             return
         if txt == '/status':
             await handle_status_command(event)
+            return
+        if txt == '/battery-status':
+            await handle_battery_status_command(event)
             return
         if txt.startswith('/max_concurrent '):
             try:

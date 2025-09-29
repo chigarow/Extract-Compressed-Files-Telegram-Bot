@@ -5,6 +5,7 @@ Handles download and upload queues with concurrency control.
 
 import asyncio
 import logging
+import os
 import time
 from .constants import DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT
 from .cache_manager import PersistentQueue

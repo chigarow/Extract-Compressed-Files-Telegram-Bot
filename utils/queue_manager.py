@@ -56,6 +56,10 @@ class QueueManager:
         self.download_task = None
         self.upload_task = None
         
+        # Pending items counters for deferred task creation
+        self._pending_download_items = 0
+        self._pending_upload_items = 0
+        
         # Load existing items from persistent storage
         self._restore_queues()
     
@@ -79,14 +83,31 @@ class QueueManager:
             except asyncio.QueueFull:
                 logger.warning("Upload queue full, skipping item")
         
-        # Start processing tasks if we have items to process
+        # Store the counts for later task creation when event loop is available
+        self._pending_download_items = download_items_restored
+        self._pending_upload_items = upload_items_restored
+        
         if download_items_restored > 0:
-            logger.info(f"Restored {download_items_restored} download tasks, starting download processor")
-            self.download_task = asyncio.create_task(self._process_download_queue())
+            logger.info(f"Restored {download_items_restored} download tasks, will start processor when event loop is ready")
         
         if upload_items_restored > 0:
-            logger.info(f"Restored {upload_items_restored} upload tasks, starting upload processor")
+            logger.info(f"Restored {upload_items_restored} upload tasks, will start processor when event loop is ready")
+    
+    async def ensure_processors_started(self):
+        """Ensure processing tasks are started for restored items. Call this when event loop is running."""
+        # Start download processor if we have pending items and no task is running
+        if (self._pending_download_items > 0 and 
+            (self.download_task is None or self.download_task.done())):
+            logger.info(f"Starting download processor for {self._pending_download_items} restored tasks")
+            self.download_task = asyncio.create_task(self._process_download_queue())
+            self._pending_download_items = 0
+        
+        # Start upload processor if we have pending items and no task is running
+        if (self._pending_upload_items > 0 and 
+            (self.upload_task is None or self.upload_task.done())):
+            logger.info(f"Starting upload processor for {self._pending_upload_items} restored tasks")
             self.upload_task = asyncio.create_task(self._process_upload_queue())
+            self._pending_upload_items = 0
     
     async def add_download_task(self, task: dict):
         """Add a download task to the queue."""

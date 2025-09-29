@@ -284,6 +284,9 @@ async def main_async():
         # Ensure target entity can be resolved
         await ensure_target_entity()
         
+        # Start queue processors for any restored items
+        await queue_manager.ensure_processors_started()
+        
         # Start background tasks
         save_task = asyncio.create_task(save_current_processes())
         retry_task = asyncio.create_task(retry_failed_operations())

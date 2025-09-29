@@ -17,7 +17,7 @@ logger = logging.getLogger('extractor')
 
 
 def make_serializable(obj):
-    \"\"\"Convert Telethon objects and other non-serializable objects to serializable format.\"\"\"
+    """Convert Telethon objects and other non-serializable objects to serializable format."""
     # Handle None values first
     if obj is None:
         return None

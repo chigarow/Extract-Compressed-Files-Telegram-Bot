@@ -14,6 +14,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Password Protected Archive Support**: Handles password-protected archives with a simple command interface.
 - **Fast Video Compression**: Automatically compresses all video files to MP4 format optimized for Telegram streaming.
 - **Proper Video Attributes**: Videos now have correct duration and thumbnail for proper display in Telegram (fixes black thumbnails and 00:00 duration).
+- **Unsupported Video Format Conversion**: All unsupported video formats (not just .ts) are automatically converted to MP4 format to ensure proper playback in Telegram, even when transcoding is disabled.
 - **Media Tab Support**: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
 - **Grouped Media Uploads**: Uploads images and videos as separate grouped albums with archive name as caption.
 - **FastTelethon Parallel Downloads**: Automatic 10-20x speed acceleration for large files using parallel MTProto connections.
@@ -126,6 +127,26 @@ The script now ensures videos have proper thumbnails and durations displayed in 
 - Setting correct duration and dimensions when uploading
 - Using proper video attributes (`DocumentAttributeVideo`) during upload
 - This resolves the common issue of black thumbnails and 00:00 duration display
+
+### Enhanced Video Format Support
+
+The script now includes comprehensive support for various video formats:
+
+- All unsupported video formats (.ts, .mkv, .avi, .mov, .wmv, .flv, and many others) are automatically converted to MP4 format
+- This ensures proper playback and streaming in Telegram, since Telegram's video player is optimized for MP4 files
+- Conversion uses the same optimized settings as regular video transcoding
+- This applies to both direct media uploads and videos extracted from archives
+- The script checks if videos are compatible with Telegram before uploading, and only converts when necessary to save processing time
+
+### Automatic Retry for Failed Operations
+
+The script now includes robust error handling and automatic retry mechanisms:
+
+- Failed operations (due to FloodWaitError or other network issues) are automatically saved to `failed_operations.json`
+- A background task runs every 30 minutes to retry failed operations
+- Each retry attempt is logged and tracked to prevent infinite retry loops
+- Operations involving FloodWaitError respect the required waiting periods
+- This ensures that temporary network issues or rate limits don't cause permanent failures
 
 ### Grouped Media Uploads
 

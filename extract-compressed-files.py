@@ -71,7 +71,7 @@ if not TARGET_USERNAME:
 ARCHIVE_EXTENSIONS = ('.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz')
 PHOTO_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp')  # exclude gif to avoid doc behavior
 ANIMATED_EXTENSIONS = ('.gif',)  # treat as skip or later special handling (skipped for now)
-VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.webm')
+VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.m4v', '.flv', '.wmv', '.3gp', '.webm', '.vob', '.m2ts', '.mts', '.m2v', '.mpg', '.mpeg', '.ogv', '.ogg', '.drc', '.gifv', '.mng', '.qt', '.yuv', '.rm', '.rmvb', '.asf', '.amv', '.m3u8')
 MEDIA_EXTENSIONS = PHOTO_EXTENSIONS + VIDEO_EXTENSIONS  # only these will be sent
 
 LOG_FILE = os.path.join(DATA_DIR, 'app.log')
@@ -138,6 +138,18 @@ ongoing_operations = {
 
 # Track cancelled operations by filename to properly interrupt downloads
 cancelled_operations = set()
+
+# Failed operations queue for retry
+FAILED_OPERATIONS_FILE = os.path.join(DATA_DIR, 'failed_operations.json')
+failed_operations = []
+
+# Load previously failed operations
+if os.path.exists(FAILED_OPERATIONS_FILE):
+    try:
+        with open(FAILED_OPERATIONS_FILE, 'r') as f:
+            failed_operations = json.load(f)
+    except Exception:
+        failed_operations = []
 
 def check_file_command_supports_mime():
     """Checks if the system's 'file' command supports the --mime-type flag."""
@@ -212,6 +224,53 @@ def validate_video_file(file_path: str) -> dict:
         logger.error(f"Error during video validation for {file_path}: {e}")
         return {}
 
+def is_telegram_compatible_video(file_path: str) -> bool:
+    """
+    Check if a video is already compatible with Telegram's requirements.
+    Returns True if the video is compatible with Telegram, False otherwise.
+    """
+    if not is_ffprobe_available():
+        logger.warning("ffprobe not found, assuming video is not Telegram compatible")
+        return False
+    
+    try:
+        # Check if file is MP4 container with H.264 codec
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-show_entries', 'format=format_name,codec_name',
+            '-select_streams', 'v:0',
+            '-of', 'csv=p=0',
+            file_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            # Get the video format info
+            output = result.stdout.strip().split(',')
+            if len(output) >= 2:
+                container = output[0].lower()
+                codec = output[1].lower()
+                
+                # Check if it's MP4 container with H.264 codec
+                if container == 'mp4' and codec in ['h264', 'avc1']:
+                    logger.info(f"{file_path} is already Telegram compatible")
+                    return True
+                else:
+                    logger.info(f"{file_path} is not Telegram compatible (container={container}, codec={codec})")
+                    return False
+            else:
+                logger.warning(f"Could not parse ffprobe output for {file_path}")
+                return False
+        else:
+            logger.warning(f"ffprobe failed for {file_path}, assuming video is not Telegram compatible")
+            return False
+    except Exception as e:
+        logger.error(f"Error checking if video is Telegram compatible: {e}")
+        return False
+
+
 def needs_video_processing(file_path: str) -> bool:
     """
     Check if a video needs processing based on its format and metadata.
@@ -221,40 +280,17 @@ def needs_video_processing(file_path: str) -> bool:
         logger.warning("ffprobe not found, assuming video needs processing")
         return True
     
-    try:
-        # Check if file is already MP4
-        if file_path.lower().endswith('.mp4'):
-            # For MP4 files, check if they have proper keyframes and metadata
-            cmd = [
-                'ffprobe',
-                '-v', 'quiet',
-                '-show_entries', 'stream=codec_name,codec_type,avg_frame_rate,has_b_frames',
-                '-select_streams', 'v:0',
-                '-of', 'json',
-                file_path
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                import json
-                info = json.loads(result.stdout)
-                if 'streams' in info and len(info['streams']) > 0:
-                    stream = info['streams'][0]
-                    # If it's already H.264 and has reasonable settings, we might not need to re-encode
-                    # But for safety, we'll still process it to ensure proper Telegram compatibility
-                    return True
-            else:
-                logger.warning(f"ffprobe failed for {file_path}, assuming video needs processing")
-                return True
-        else:
-            # Non-MP4 files always need processing
-            return True
-            
-        return False
-    except Exception as e:
-        logger.error(f"Error checking if video needs processing: {e}")
-        # If in doubt, process the video
+    # Check if it's a .ts file which always needs conversion regardless of other settings
+    if file_path.lower().endswith('.ts'):
+        return True
+    
+    # Check if the video is already compatible with Telegram
+    if is_telegram_compatible_video(file_path):
+        # Even if it's compatible, we might still want to process it
+        # depending on user settings, so we'll return based on TRANSCODE_ENABLED
+        return TRANSCODE_ENABLED
+    else:
+        # Video is not Telegram compatible, so it needs processing regardless of TRANSCODE_ENABLED
         return True
 
 async def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
@@ -617,7 +653,37 @@ async def process_archive_event(event):
         try:
             await status_msg.edit(f'❌ Download failed: {e}')
         except Exception:
-            await event.reply(f'❌ Failed to download archive: {e}')
+            try:
+                await event.reply(f'❌ Failed to download archive: {e}')
+            except Exception:
+                pass  # If we can't send a message, just continue with the handling
+        
+        # Handle FloodWaitError and other errors by saving them for retry
+        if "FloodWaitError" in str(type(e)):
+            # Extract wait time from FloodWaitError if possible
+            wait_time = getattr(e, 'seconds', 60)
+            error_msg = f"FloodWaitError: Wait {wait_time} seconds required"
+        else:
+            error_msg = str(e)
+        
+        # Add to failed operations for retry
+        failed_operation = {
+            'type': 'archive_download',
+            'filename': filename,
+            'message_id': message.id,
+            'error': error_msg,
+            'timestamp': int(time.time()),
+            'retry_count': 0
+        }
+        failed_operations.append(failed_operation)
+        
+        # Save failed operations to file
+        try:
+            with open(FAILED_OPERATIONS_FILE, 'w') as f:
+                json.dump(failed_operations, f, indent=2)
+        except Exception as save_error:
+            logger.error(f'Failed to save failed operations: {save_error}')
+        
         # Clean up partially downloaded file
         if os.path.exists(temp_archive_path):
             try:
@@ -784,8 +850,10 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
             await client.send_file(target, file_path, caption=filename, force_document=False, 
                                    progress_callback=create_progress_callback(filename))
         elif ext in VIDEO_EXTENSIONS:
-            # Check if video needs transcoding
-            if TRANSCODE_ENABLED and needs_video_processing(file_path):
+            # Check if video needs processing for Telegram compatibility
+            should_process = needs_video_processing(file_path)
+            
+            if should_process:
                 # Compress video to MP4 format for better Telegram streaming
                 compressed_path = os.path.splitext(file_path)[0] + '_compressed.mp4'
                 if await compress_video_for_telegram(file_path, compressed_path):
@@ -890,7 +958,36 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
         
     except Exception as e:
         logger.error(f'Error uploading media file {filename}: {e}')
-        await event.reply(f'❌ Error uploading {filename}: {e}')
+        try:
+            await event.reply(f'❌ Error uploading {filename}: {e}')
+        except Exception as reply_error:
+            logger.error(f'Failed to send error reply: {reply_error}')
+        
+        # Handle FloodWaitError and other errors by saving them for retry
+        if "FloodWaitError" in str(type(e)):
+            # Extract wait time from FloodWaitError if possible
+            wait_time = getattr(e, 'seconds', 60)
+            error_msg = f"FloodWaitError: Wait {wait_time} seconds required"
+        else:
+            error_msg = str(e)
+        
+        # Add to failed operations for retry
+        failed_operation = {
+            'type': 'direct_media_upload',
+            'filename': filename,
+            'file_path': file_path,
+            'error': error_msg,
+            'timestamp': int(time.time()),
+            'retry_count': 0
+        }
+        failed_operations.append(failed_operation)
+        
+        # Save failed operations to file
+        try:
+            with open(FAILED_OPERATIONS_FILE, 'w') as f:
+                json.dump(failed_operations, f, indent=2)
+        except Exception as save_error:
+            logger.error(f'Failed to save failed operations: {save_error}')
 
 
 async def process_queue():
@@ -1129,6 +1226,7 @@ async def process_extract_and_upload(download_status):
                 await event.reply(f'Error sending {os.path.basename(path)}: {e}')
         
         # Upload videos individually with proper attributes to ensure they appear in Media tab
+        compressed_video_paths = []  # Keep track of compressed files for cleanup
         for path in video_files:
             original_path = path
             ext = os.path.splitext(path)[1].lower()
@@ -1137,8 +1235,11 @@ async def process_extract_and_upload(download_status):
                 # Validate video file before processing
                 video_info = validate_video_file(path)
                 
-                # Check if video needs processing
-                if TRANSCODE_ENABLED and needs_video_processing(path):
+                # Check if video needs processing - always convert .ts files regardless of TRANSCODE_ENABLED setting
+                should_transcode = TRANSCODE_ENABLED and needs_video_processing(path)
+                is_ts_file = ext == '.ts'  # Always convert .ts files to MP4 for proper Telegram compatibility
+                
+                if should_transcode or is_ts_file:
                     # Compress all video files to MP4 format for better Telegram streaming
                     compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
                     if await compress_video_for_telegram(path, compressed_path):
@@ -1309,6 +1410,7 @@ async def handle_password_command(event, password: str):
                 await event.reply(f'Error sending {os.path.basename(path)}: {e}')
         
         # Upload videos individually with proper attributes to ensure they appear in Media tab
+        compressed_video_paths = []  # Keep track of compressed files for cleanup
         for path in video_files:
             original_path = path
             ext = os.path.splitext(path)[1].lower()
@@ -1317,8 +1419,11 @@ async def handle_password_command(event, password: str):
                 # Validate video file before processing
                 video_info = validate_video_file(path)
                 
-                # Check if video needs processing
-                if TRANSCODE_ENABLED and needs_video_processing(path):
+                # Check if video needs processing - always convert .ts files regardless of TRANSCODE_ENABLED setting
+                should_transcode = TRANSCODE_ENABLED and needs_video_processing(path)
+                is_ts_file = ext == '.ts'  # Always convert .ts files to MP4 for proper Telegram compatibility
+                
+                if should_transcode or is_ts_file:
                     # Compress all video files to MP4 format for better Telegram streaming
                     compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
                     if await compress_video_for_telegram(path, compressed_path):
@@ -1796,6 +1901,270 @@ async def handle_cancel_process(event):
         file_list = ', '.join([f'"{f}"' for f in cancelled_files])
         await event.reply(f'✅ Processes for {file_list} have been cancelled and files deleted.')
 
+async def retry_failed_operations():
+    """
+    Function to retry failed operations that were saved to the failed_operations.json file.
+    """
+    global failed_operations
+    
+    # Load failed operations from file
+    if os.path.exists(FAILED_OPERATIONS_FILE):
+        try:
+            with open(FAILED_OPERATIONS_FILE, 'r') as f:
+                failed_operations = json.load(f)
+        except Exception:
+            failed_operations = []
+    
+    if not failed_operations:
+        return  # Nothing to retry
+    
+    # Create a copy to iterate over while modifying the original
+    operations_to_retry = failed_operations.copy()
+    
+    for idx, operation in enumerate(operations_to_retry):
+        try:
+            operation_type = operation.get('type', '')
+            error_msg = operation.get('error', '')
+            
+            # Skip if it's a FloodWaitError that's still in effect
+            if "FloodWaitError" in error_msg:
+                # Extract the seconds from the error message
+                import re
+                match = re.search(r'Wait (\d+) seconds required', error_msg)
+                if match:
+                    wait_seconds = int(match.group(1))
+                    original_timestamp = operation.get('timestamp', 0)
+                    elapsed_time = time.time() - original_timestamp
+                    
+                    # Only retry if enough time has passed
+                    if elapsed_time < wait_seconds:
+                        continue
+            
+            # Update retry count
+            operation['retry_count'] = operation.get('retry_count', 0) + 1
+            logger.info(f"Retrying operation {operation.get('filename', 'unknown')} - Attempt {operation['retry_count']}")
+            
+            # Handle different operation types
+            if operation_type == 'direct_media_download':
+                # Retry direct media download
+                filename = operation.get('filename', '')
+                message_id = operation.get('message_id', 0)
+                
+                # Try to get the original message
+                try:
+                    original_message = await client.get_messages(TARGET_USERNAME, ids=message_id)
+                    if original_message and original_message.document:
+                        # Create a new event to simulate the original message
+                        new_event = type('MockEvent', (), {
+                            'message': original_message,
+                            'raw_text': None,
+                            'reply': lambda text: print(f"Would reply: {text}")
+                        })()
+                        
+                        # Add to processing queue as direct media
+                        size_bytes = original_message.file.size or 0
+                        temp_media_path = os.path.join(DATA_DIR, filename)
+                        
+                        download_status = {
+                            'filename': filename,
+                            'status': 'downloading',
+                            'start_time': time.time(),
+                            'size': size_bytes,
+                            'progress': 0,
+                            'event': new_event,
+                            'temp_archive_path': temp_media_path,
+                            'message': original_message,
+                            'direct_media': True  # Flag for direct media upload
+                        }
+                        
+                        logger.info(f'Adding {filename} to processing queue for retry')
+                        await processing_queue.put(download_status)
+                        
+                        # Start the processing task if it's not already running
+                        global processing_task
+                        if processing_task is None or processing_task.done():
+                            logger.info(f'Starting new processing task for retry of {filename}')
+                            processing_task = asyncio.create_task(process_queue())
+                        else:
+                            logger.info(f'Processing task already running, {filename} added to queue for retry')
+                        
+                        # Remove from failed operations
+                        failed_operations.remove(operation)
+                        continue
+                except Exception as e:
+                    logger.error(f'Could not retrieve original message for retry: {e}')
+            
+            elif operation_type == 'direct_media_upload':
+                # For failed uploads, just try to re-upload the file
+                filename = operation.get('filename', '')
+                file_path = operation.get('file_path', '')
+                
+                if os.path.exists(file_path):
+                    # Create a mock event to retry the upload
+                    # We'll need to create a fake event to retry the upload
+                    try:
+                        # Get the target entity
+                        target = await ensure_target_entity()
+                        
+                        # Create progress callback
+                        def create_progress_callback(file_type):
+                            start_time = time.time()
+                            last_edit_pct = [-5]
+                            last_edit_time = [0]
+
+                            async def upload_progress(current, total):
+                                pct = int(current * 100 / total) if total > 0 else 0
+                                now = time.time()
+
+                                elapsed = now - start_time
+                                speed = current / elapsed if elapsed > 0 else 0
+                                eta = (total - current) / speed if speed > 0 else float('inf')
+
+                                if (pct >= last_edit_pct[0] + 5) or ((now - last_edit_time[0]) > 5):
+                                    txt = f'📤 Retrying upload {file_type}: {pct}% | {human_size(speed)}/s | ETA: {format_eta(eta)}'
+                                    try:
+                                        logger.info(txt)  # Log instead of edit message since we don't have the original context
+                                    except:
+                                        pass
+                                    last_edit_pct[0] = pct
+                                    last_edit_time[0] = now
+                            return upload_progress
+                        
+                        # Determine file type and retry upload
+                        ext = os.path.splitext(filename)[1].lower()
+                        if ext in PHOTO_EXTENSIONS:
+                            await client.send_file(target, file_path, caption=filename, force_document=False, 
+                                                   progress_callback=create_progress_callback(filename))
+                        elif ext in VIDEO_EXTENSIONS:
+                            # For videos, check if they need processing
+                            should_process = needs_video_processing(file_path)
+                            
+                            if should_process:
+                                compressed_path = os.path.splitext(file_path)[0] + '_compressed.mp4'
+                                if await compress_video_for_telegram(file_path, compressed_path):
+                                    duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(compressed_path)
+                                    
+                                    from telethon.tl.types import DocumentAttributeVideo
+                                    
+                                    await client.send_file(
+                                        target, 
+                                        compressed_path, 
+                                        caption=filename,
+                                        force_document=False,
+                                        supports_streaming=True,
+                                        progress_callback=create_progress_callback(filename),
+                                        attributes=[
+                                            DocumentAttributeVideo(
+                                                duration=duration,
+                                                w=width,
+                                                h=height,
+                                                supports_streaming=True
+                                            )
+                                        ],
+                                        thumb=thumbnail_path
+                                    )
+                                    
+                                    # Clean up compressed file and thumbnail
+                                    try:
+                                        os.remove(compressed_path)
+                                        if thumbnail_path and os.path.exists(thumbnail_path):
+                                            os.remove(thumbnail_path)
+                                    except:
+                                        pass
+                                else:
+                                    # If compression fails, upload original
+                                    duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
+                                    
+                                    from telethon.tl.types import DocumentAttributeVideo
+                                    
+                                    await client.send_file(
+                                        target, 
+                                        file_path, 
+                                        caption=filename,
+                                        force_document=False,
+                                        supports_streaming=True,
+                                        progress_callback=create_progress_callback(filename),
+                                        attributes=[
+                                            DocumentAttributeVideo(
+                                                duration=duration,
+                                                w=width,
+                                                h=height,
+                                                supports_streaming=True
+                                            )
+                                        ],
+                                        thumb=thumbnail_path
+                                    )
+                                    
+                                    # Clean up thumbnail
+                                    if thumbnail_path and os.path.exists(thumbnail_path):
+                                        os.remove(thumbnail_path)
+                            else:
+                                # Upload as-is
+                                duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
+                                
+                                from telethon.tl.types import DocumentAttributeVideo
+                                
+                                await client.send_file(
+                                    target, 
+                                    file_path, 
+                                    caption=filename,
+                                    force_document=False,
+                                    supports_streaming=True,
+                                    progress_callback=create_progress_callback(filename),
+                                    attributes=[
+                                        DocumentAttributeVideo(
+                                            duration=duration,
+                                            w=width,
+                                            h=height,
+                                            supports_streaming=True
+                                        )
+                                    ],
+                                    thumb=thumbnail_path
+                                )
+                                
+                                # Clean up thumbnail
+                                if thumbnail_path and os.path.exists(thumbnail_path):
+                                    os.remove(thumbnail_path)
+                        
+                        logger.info(f"Successfully retried upload for {filename}")
+                        failed_operations.remove(operation)
+                    except Exception as e:
+                        logger.error(f"Retry failed for {filename}: {e}")
+                        # Update the error and timestamp in the record
+                        operation['error'] = str(e)
+                        operation['timestamp'] = int(time.time())
+                        if "FloodWaitError" in str(type(e)):
+                            wait_time = getattr(e, 'seconds', 60)
+                            operation['error'] = f"FloodWaitError: Wait {wait_time} seconds required"
+        
+        except Exception as e:
+            logger.error(f'Error during retry of operation: {e}')
+            # Still try to remove the operation to prevent infinite loop
+            try:
+                failed_operations.remove(operation)
+            except ValueError:
+                pass  # Already removed
+    
+    # Save updated failed operations list
+    try:
+        with open(FAILED_OPERATIONS_FILE, 'w') as f:
+            json.dump(failed_operations, f, indent=2)
+    except Exception as save_error:
+        logger.error(f'Failed to save failed operations after retry: {save_error}')
+
+# Schedule periodic retry of failed operations
+async def schedule_retry_task():
+    """Schedule periodic checking and retrying of failed operations"""
+    while True:
+        try:
+            # Retry failed operations every 30 minutes
+            await retry_failed_operations()
+            await asyncio.sleep(1800)  # Sleep for 30 minutes
+        except Exception as e:
+            logger.error(f'Error in retry task: {e}')
+            await asyncio.sleep(300)  # Wait 5 minutes before retrying the task itself
+
+
 @client.on(events.NewMessage(incoming=True))
 async def watcher(event):
     global pending_password
@@ -2000,7 +2369,37 @@ async def watcher(event):
                 try:
                     await status_msg.edit(f'❌ Download failed: {e}')
                 except Exception:
-                    await event.reply(f'❌ Failed to download media: {e}')
+                    try:
+                        await event.reply(f'❌ Failed to download media: {e}')
+                    except Exception:
+                        pass  # If we can't send a message, just continue with the handling
+                
+                # Handle FloodWaitError and other errors by saving them for retry
+                if "FloodWaitError" in str(type(e)):
+                    # Extract wait time from FloodWaitError if possible
+                    wait_time = getattr(e, 'seconds', 60)
+                    error_msg = f"FloodWaitError: Wait {wait_time} seconds required"
+                else:
+                    error_msg = str(e)
+                
+                # Add to failed operations for retry
+                failed_operation = {
+                    'type': 'direct_media_download',
+                    'filename': filename,
+                    'message_id': event.message.id,
+                    'error': error_msg,
+                    'timestamp': int(time.time()),
+                    'retry_count': 0
+                }
+                failed_operations.append(failed_operation)
+                
+                # Save failed operations to file
+                try:
+                    with open(FAILED_OPERATIONS_FILE, 'w') as f:
+                        json.dump(failed_operations, f, indent=2)
+                except Exception as save_error:
+                    logger.error(f'Failed to save failed operations: {save_error}')
+                
                 # Clean up partially downloaded file
                 if os.path.exists(temp_media_path):
                     try:
@@ -2019,6 +2418,10 @@ async def watcher(event):
 async def main_async():
     logger.info('Starting Telethon client...')
     await client.start()
+    
+    # Start the retry task
+    asyncio.create_task(schedule_retry_task())
+    
     me = await client.get_me()
     logger.info(f'Logged in as: {me.id} / {me.username or me.first_name}')
     logger.info('Waiting for incoming archives from target user...')

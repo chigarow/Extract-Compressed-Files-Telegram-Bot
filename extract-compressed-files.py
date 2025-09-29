@@ -93,6 +93,10 @@ processing_queue = get_processing_queue()
 # Get Telegram client
 client = get_client()
 
+# Update the global client reference in telegram_operations
+import utils.telegram_operations as telegram_ops_module
+telegram_ops_module.client = client
+
 # Global state variables
 pending_password = None
 current_processing = None
@@ -112,145 +116,7 @@ async def save_current_processes():
             logger.error(f"Error saving current processes: {e}")
 
 
-async def process_archive_event(event):
-    """Process an incoming archive file event."""
-    global pending_password, current_processing
-    
-    message = event.message
-    filename = message.file.name or 'file'
-    size_bytes = message.file.size or 0
-    size_gb = size_bytes / (1024 ** 3)
-    
-    if size_gb > MAX_ARCHIVE_GB:
-        await event.reply(f'❌ Archive too large ({human_size(size_bytes)}). Limit is {MAX_ARCHIVE_GB} GB.')
-        return
-
-    # Check if already processed
-    if cache_manager.is_processed(filename, size_bytes):
-        await event.reply(f'⏩ Archive {filename} with size {human_size(size_bytes)} was already processed. Skipping download and extraction.')
-        return
-
-    logger.info(f'Received archive: {filename} size={human_size(size_bytes)}')
-    temp_archive_path = os.path.join(DATA_DIR, filename)
-    start_download_ts = time.time()
-    
-    # Update current processing status for download phase
-    download_status = {
-        'filename': filename,
-        'status': 'downloading',
-        'start_time': start_download_ts,
-        'size': size_bytes,
-        'progress': 0,
-        'event': event,
-        'temp_archive_path': temp_archive_path,
-        'message': message
-    }
-    
-    current_processing = download_status
-    await process_manager.update_download_process(download_status)
-    
-    status_msg = await event.reply(f'⬇️ Download 0% | ETA -- | 0.00 / {human_size(size_bytes)}')
-    
-    # Create progress callback
-    progress_callback = create_download_progress_callback(status_msg, download_status, start_download_ts)
-    
-    try:
-        # Initialize Telegram operations
-        telegram_ops = TelegramOperations(client)
-        
-        # Download file with progress
-        await telegram_ops.download_file_with_progress(
-            message, temp_archive_path, progress_callback
-        )
-        
-        # Update status
-        await status_msg.edit(f'✅ Download completed! Starting extraction...')
-        logger.info(f'Download completed for {filename}')
-        
-        # Add to processing queue
-        await queue_manager.add_processing_task({
-            'type': 'extract_and_upload',
-            'download_status': download_status,
-            'temp_archive_path': temp_archive_path,
-            'filename': filename,
-            'event': event
-        })
-        
-        # Clear download process
-        await process_manager.clear_download_process()
-        
-    except FloodWaitError as e:
-        logger.warning(f"Rate limited during download, need to wait {e.seconds} seconds")
-        await event.reply(f'⏸️ Rate limited. Retrying in {e.seconds} seconds...')
-        # Add to failed operations for retry
-        failed_ops_manager.add_failed_operation({
-            'type': 'download',
-            'event_data': {'filename': filename, 'size': size_bytes},
-            'retry_after': time.time() + e.seconds
-        })
-    except FileReferenceExpiredError:
-        logger.error("File reference expired during download")
-        await event.reply('❌ File reference expired. Please send the file again.')
-    except Exception as e:
-        logger.error(f'Download error for {filename}: {e}')
-        await event.reply(f'❌ Download failed: {e}')
-        
-        # Clean up
-        try:
-            if os.path.exists(temp_archive_path):
-                os.remove(temp_archive_path)
-        except Exception:
-            pass
-    finally:
-        current_processing = None
-
-
-async def process_direct_media_upload(event, file_path: str, filename: str):
-    """Process direct media upload."""
-    try:
-        size_bytes = os.path.getsize(file_path)
-        
-        # Check if already processed
-        if cache_manager.is_processed(filename, size_bytes):
-            await event.reply(f'⏩ Direct media {filename} with size {human_size(size_bytes)} was already processed. Skipping upload.')
-            try:
-                os.remove(file_path)
-                logger.info(f'Cleaned up already processed file: {file_path}')
-            except Exception as e:
-                logger.warning(f'Failed to clean up already processed file {file_path}: {e}')
-            return
-        
-        # Check hash
-        file_hash = None
-        try:
-            file_hash = compute_sha256(file_path)
-            if cache_manager.is_hash_processed(file_hash):
-                await event.reply('⏩ Media file already processed earlier (hash match). Skipping upload.')
-                try:
-                    os.remove(file_path)
-                    logger.info(f'Cleaned up already processed file: {file_path}')
-                except Exception as e:
-                    logger.warning(f'Failed to clean up already processed file {file_path}: {e}')
-                return
-        except Exception as e:
-            logger.warning(f'Hashing failed (continuing): {e}')
-        
-        # Add to upload queue
-        upload_task = {
-            'type': 'direct_media',
-            'event': event,
-            'file_path': file_path,
-            'filename': filename,
-            'file_hash': file_hash,
-            'size_bytes': size_bytes
-        }
-        
-        await queue_manager.add_upload_task(upload_task)
-        await event.reply(f'📋 Queue: Media {filename} added to upload queue.')
-        
-    except Exception as e:
-        logger.error(f'Error queuing media upload {filename}: {e}')
-        await event.reply(f'❌ Error queuing upload for {filename}: {e}')
+# Archive and media processing is now handled by the queue system
 
 
 @client.on(events.NewMessage(incoming=True))
@@ -313,25 +179,58 @@ async def watcher(event):
             
             # Check if it's an archive
             if file_ext in ARCHIVE_EXTENSIONS:
-                await process_archive_event(event)
+                # Add archive to download queue
+                temp_archive_path = os.path.join(DATA_DIR, filename)
+                
+                download_task = {
+                    'type': 'archive_download',
+                    'message': msg,
+                    'event': event,
+                    'filename': filename,
+                    'temp_path': temp_archive_path,
+                    'size_bytes': msg.file.size or 0
+                }
+                
+                # Check size limit
+                size_gb = (msg.file.size or 0) / (1024 ** 3)
+                if size_gb > MAX_ARCHIVE_GB:
+                    await event.reply(f'❌ Archive too large ({human_size(msg.file.size or 0)}). Limit is {MAX_ARCHIVE_GB} GB.')
+                    return
+                
+                # Check if already processed
+                if cache_manager.is_processed(filename, msg.file.size or 0):
+                    await event.reply(f'⏩ Archive {filename} was already processed. Skipping.')
+                    return
+                
+                await queue_manager.add_download_task(download_task)
+                
+                # Check queue position
+                queue_position = queue_manager.download_queue.qsize()
+                if queue_position > 0:
+                    await event.reply(f'📋 {filename} added to download queue (position: {queue_position})')
+                else:
+                    await event.reply(f'⬇️ Starting download: {filename}')
             # Check if it's direct media
             elif file_ext in MEDIA_EXTENSIONS:
-                # Download and process as direct media
+                # Add direct media to download queue instead of processing immediately
                 temp_path = os.path.join(DATA_DIR, filename)
                 
-                try:
-                    telegram_ops = TelegramOperations(client)
-                    await telegram_ops.download_file_with_progress(msg, temp_path)
-                    await process_direct_media_upload(event, temp_path, filename)
-                except Exception as e:
-                    logger.error(f'Error processing direct media {filename}: {e}')
-                    await event.reply(f'❌ Error processing media: {e}')
-                    # Clean up on error
-                    try:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                    except Exception:
-                        pass
+                download_task = {
+                    'type': 'direct_media_download',
+                    'message': msg,
+                    'event': event,
+                    'filename': filename,
+                    'temp_path': temp_path
+                }
+                
+                await queue_manager.add_download_task(download_task)
+                
+                # Check queue position
+                queue_position = queue_manager.download_queue.qsize()
+                if queue_position > 0:
+                    await event.reply(f'📋 {filename} added to download queue (position: {queue_position})')
+                else:
+                    await event.reply(f'⬇️ Starting download: {filename}')
             else:
                 # Not a supported file type
                 await event.reply(f'ℹ️ File type not supported: {file_ext}')
@@ -345,15 +244,18 @@ async def retry_failed_operations():
     """Retry failed operations periodically."""
     while True:
         try:
-            await asyncio.sleep(30 * 60)  # Check every 30 minutes
+            await asyncio.sleep(5 * 60)  # Check every 5 minutes for retries
             
+            # Process retry queue from queue manager
+            await queue_manager.process_retry_queue()
+            
+            # Also check legacy failed operations
             failed_ops = failed_ops_manager.get_failed_operations()
             current_time = time.time()
             
             for op in failed_ops:
                 if op.get('retry_after', 0) <= current_time:
-                    logger.info(f"Retrying failed operation: {op}")
-                    # TODO: Implement retry logic based on operation type
+                    logger.info(f"Retrying legacy failed operation: {op}")
                     failed_ops_manager.remove_failed_operation(op)
                     
         except asyncio.CancelledError:

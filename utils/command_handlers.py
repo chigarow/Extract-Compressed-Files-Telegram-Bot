@@ -339,39 +339,73 @@ async def handle_status_command(event):
 
 async def handle_queue_command(event):
     """Show current processing status and queue information"""
-    global current_processing, pending_password, processing_queue
+    global current_processing, pending_password
+    
+    # Import queue manager
+    from .queue_manager import get_queue_manager, get_processing_queue
+    queue_manager = get_queue_manager()
+    processing_queue = get_processing_queue()
     
     status_lines = []
     
-    # Show current processing file
-    if current_processing:
-        cp = current_processing
-        elapsed = time.time() - cp['start_time']
-        status_line = f"📁 **{cp['filename']}**\n"
-        status_line += f"Status: {cp['status'].title()}\n"
-        status_line += f"Elapsed: {format_eta(elapsed)}\n"
-        
-        if cp['status'] == 'downloading' and 'progress' in cp:
-            status_line += f"Progress: {cp['progress']}%\n"
-        elif cp['status'] == 'uploading' and 'uploaded_files' in cp and 'total_files' in cp:
-            status_line += f"Upload: {cp['uploaded_files']}/{cp['total_files']} files\n"
-        
-        status_line += f"Size: {human_size(cp['size'])}"
+    # Get queue status from queue manager
+    queue_status = queue_manager.get_queue_status()
+    
+    # Show download queue
+    download_queue_size = queue_status.get('download_queue_size', 0)
+    download_running = queue_status.get('download_task_running', False)
+    download_active = queue_status.get('download_semaphore_available', 2)
+    download_concurrent = 2 - download_active
+    
+    if download_queue_size > 0 or download_concurrent > 0:
+        status_line = f"⬇️ **Downloads:**\n"
+        status_line += f"Active: {download_concurrent}/2\n"
+        status_line += f"Queued: {download_queue_size}"
         status_lines.append(status_line)
+    
+    # Show upload queue  
+    upload_queue_size = queue_status.get('upload_queue_size', 0)
+    upload_running = queue_status.get('upload_task_running', False)
+    upload_active = queue_status.get('upload_semaphore_available', 2)
+    upload_concurrent = 2 - upload_active
+    
+    if upload_queue_size > 0 or upload_concurrent > 0:
+        status_line = f"📤 **Uploads:**\n"
+        status_line += f"Active: {upload_concurrent}/2\n"
+        status_line += f"Queued: {upload_queue_size}"
+        status_lines.append(status_line)
+    
+    # Show processing queue (extraction)
+    if processing_queue:
+        processing_size = processing_queue.get_queue_size()
+        current_proc = processing_queue.get_current_processing()
+        
+        if processing_size > 0 or current_proc:
+            status_line = f"🔄 **Processing:**\n"
+            if current_proc:
+                status_line += f"Current: {current_proc.get('filename', 'unknown')}\n"
+            status_line += f"Queued: {processing_size}"
+            status_lines.append(status_line)
     
     # Show pending password-protected archive
     if pending_password:
         pp = pending_password
         status_lines.append(f"🔐 **{pp['filename']}** - Waiting for password")
     
-    # Show processing queue (files waiting for extraction/upload after download)
-    if processing_queue:
-        queue_size = processing_queue.qsize()
-        if queue_size > 0:
-            status_lines.append(f"🕒 **Processing queue:** {queue_size} files waiting for extraction/upload")
-        elif current_processing or pending_password:
-            # Show that there are no queued files
-            status_lines.append("🕒 **Processing queue:** Empty")
+    # Check retry queue
+    from .constants import RETRY_QUEUE_FILE
+    import json
+    retry_count = 0
+    if os.path.exists(RETRY_QUEUE_FILE):
+        try:
+            with open(RETRY_QUEUE_FILE, 'r') as f:
+                retry_queue = json.load(f)
+                retry_count = len(retry_queue)
+        except Exception:
+            pass
+    
+    if retry_count > 0:
+        status_lines.append(f"� **Retry Queue:** {retry_count} failed operations waiting for retry")
     
     if not status_lines:
         await event.reply('📭 **Queue Status:** Empty\nNo active processing or queued tasks.')

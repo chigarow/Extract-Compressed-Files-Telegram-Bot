@@ -32,10 +32,18 @@ def get_client() -> TelegramClient:
     return client
 
 
-async def ensure_target_entity():
+async def ensure_target_entity(client_instance=None):
     """Resolve the target username to a Telegram entity."""
+    global client
+    if client_instance:
+        use_client = client_instance
+    elif client:
+        use_client = client  
+    else:
+        use_client = get_client()
+        
     try:
-        entity = await client.get_entity(TARGET_USERNAME)
+        entity = await use_client.get_entity(TARGET_USERNAME)
         logger.info(f'Target user resolved: {TARGET_USERNAME} -> id={entity.id}')
         return entity
     except RPCError as e:
@@ -46,8 +54,14 @@ async def ensure_target_entity():
 class TelegramOperations:
     """Main class for Telegram operations."""
     
-    def __init__(self, client: TelegramClient):
-        self.client = client
+    def __init__(self, client_instance: TelegramClient = None):
+        global client
+        if client_instance:
+            self.client = client_instance
+        elif client:
+            self.client = client
+        else:
+            self.client = get_client()
     
     async def download_file_with_progress(self, message, file_path: str, progress_callback=None):
         """Download a file from Telegram with progress reporting."""
@@ -230,15 +244,14 @@ class TelegramOperations:
                 logger.error(f"Document upload failed for {file_path}: {e}")
                 raise
     
-    def create_progress_callback(self, event, file_type: str = "file"):
+    def create_progress_callback(self, status_msg, file_type: str = "file"):
         """Create a progress callback for upload/download operations."""
         start_time = time.time()
-        last_edit_pct = -5
+        last_edit_pct = -10
         last_edit_time = 0
-        status_msg = None
         
         async def progress_callback(current, total):
-            nonlocal last_edit_pct, last_edit_time, status_msg
+            nonlocal last_edit_pct, last_edit_time
             
             pct = int(current * 100 / total) if total > 0 else 0
             now = time.time()
@@ -247,18 +260,16 @@ class TelegramOperations:
             speed = current / elapsed if elapsed > 0 else 0
             eta = (total - current) / speed if speed > 0 else float('inf')
             
-            # Throttle status updates
-            if (pct >= last_edit_pct + 5) or ((now - last_edit_time) > 5):
+            # More conservative throttling to prevent rate limits
+            # Update only every 10% and minimum 10 seconds apart
+            if (pct >= last_edit_pct + 10) or ((now - last_edit_time) > 10):
                 txt = f'📤 Uploading {file_type}: {pct}% | {human_size(speed)}/s | ETA: {format_eta(eta)}'
                 try:
-                    if status_msg is None:
-                        status_msg = await event.reply(txt)
-                    else:
-                        await status_msg.edit(txt)
+                    await status_msg.edit(txt)
                     last_edit_pct = pct
                     last_edit_time = now
                 except Exception:
-                    pass  # Ignore edit errors
+                    pass  # Ignore edit errors (rate limits, etc.)
         
         return progress_callback
 

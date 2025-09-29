@@ -61,3 +61,8 @@ MIN_EDIT_INTERVAL = 7  # seconds
 # Queue concurrency limits
 DOWNLOAD_SEMAPHORE_LIMIT = 2  # Allow max 2 concurrent downloads
 UPLOAD_SEMAPHORE_LIMIT = 2    # Allow max 2 concurrent uploads
+
+# Retry mechanism settings
+MAX_RETRY_ATTEMPTS = 5        # Maximum retry attempts per operation
+RETRY_BASE_INTERVAL = 5       # Base interval for exponential backoff (seconds)
+RETRY_QUEUE_FILE = os.path.join(DATA_DIR, 'retry_queue.json')

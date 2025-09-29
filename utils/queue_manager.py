@@ -440,19 +440,21 @@ class QueueManager:
                     else:
                         compressed_path = base_path + '_compressed' + ext
                     
-                    await event.reply(f"🎬 Processing video: {filename}...")
+                    await upload_msg.edit(f"🎬 Processing video: {filename}...")
                     
-                    success = await compress_video_for_telegram(file_path, compressed_path)
-                    if success and os.path.exists(compressed_path):
+                    compressed_result = await compress_video_for_telegram(file_path, compressed_path)
+                    if compressed_result and os.path.exists(compressed_result):
                         # Replace original with compressed
                         try:
                             os.remove(file_path)
-                            os.rename(compressed_path, file_path)
+                            os.rename(compressed_result, file_path)
                             logger.info(f"Video compression completed: {filename}")
                         except Exception as e:
                             logger.error(f"Error replacing compressed video: {e}")
                     else:
                         logger.warning(f"Video compression failed for {filename}, uploading original")
+                else:
+                    logger.info(f"Skipping video processing for {filename} (transcoding disabled or .ts file)")
             
             # Upload the media file with progress tracking
             progress_callback = telegram_ops.create_progress_callback(upload_msg, filename)
@@ -884,9 +886,9 @@ class QueueManager:
         
         try:
             # Check if file needs compression
-            if filename.lower().endswith('.mp4'):
-                from .media_processing import compress_video_for_telegram
-                
+            from .media_processing import needs_video_processing, compress_video_for_telegram
+            
+            if needs_video_processing(file_path):
                 logger.info(f"Compressing video: {filename}")
                 compressed_path = await compress_video_for_telegram(file_path)
                 
@@ -905,6 +907,8 @@ class QueueManager:
                         logger.warning(f"Could not clean up original file {file_path}: {cleanup_e}")
                 else:
                     logger.warning(f"Compression failed for {filename}, using original file")
+            else:
+                logger.info(f"Skipping compression for {filename} (transcoding disabled or .ts file)")
             
             # Add to upload queue
             await self.add_upload_task(upload_task)

@@ -105,35 +105,48 @@ def is_telegram_compatible_video(file_path: str) -> bool:
 
 def needs_video_processing(file_path: str) -> bool:
     """
-    Check if a video needs processing based on its format and metadata.
+    Check if a video needs processing based on its format, metadata, and user settings.
     Returns True if the video should be processed, False otherwise.
     """
     if not is_ffprobe_available():
-        logger.warning("ffprobe not found, assuming video needs processing")
-        return True
+        logger.warning("ffprobe not found, checking transcode setting")
+        # Without ffprobe, respect user setting
+        return TRANSCODE_ENABLED
     
-    # Check if it's a .ts file which always needs conversion regardless of other settings
+    # .ts files can be streamed directly in Telegram, don't convert them
     if file_path.lower().endswith('.ts'):
-        return True
+        logger.info(f"Skipping .ts file conversion (streamable): {file_path}")
+        return False
+    
+    # If transcoding is disabled, don't process any files
+    if not TRANSCODE_ENABLED:
+        logger.info(f"Transcoding disabled, skipping: {file_path}")
+        return False
     
     # Check if the video is already compatible with Telegram
     if is_telegram_compatible_video(file_path):
-        # Even if it's compatible, we might still want to process it
-        # depending on user settings, so we'll return based on TRANSCODE_ENABLED
-        return TRANSCODE_ENABLED
+        # Video is already compatible, and user has transcoding enabled
+        # Still process to ensure optimal settings
+        return True
     else:
-        # Video is not Telegram compatible, so it needs processing regardless of TRANSCODE_ENABLED
+        # Video is not Telegram compatible, and user has transcoding enabled
         return True
 
 
-async def compress_video_for_telegram(input_path: str, output_path: str) -> bool:
+async def compress_video_for_telegram(input_path: str, output_path: str = None) -> str:
     """
     Compress video to MP4 format optimized for Telegram streaming.
     Uses compatible compression settings to ensure proper metadata, thumbnails, and duration display.
+    Returns the path to the compressed file if successful, None if failed.
     """
     if not is_ffmpeg_available():
         logger.warning("ffmpeg not found, skipping video compression")
-        return False
+        return None
+    
+    # Generate output path if not provided
+    if output_path is None:
+        base_name = os.path.splitext(input_path)[0]
+        output_path = base_name + '_compressed.mp4'
     
     try:
         # Enhanced MP4 compression settings optimized for Telegram
@@ -186,7 +199,7 @@ async def compress_video_for_telegram(input_path: str, output_path: str) -> bool
         
         if result.returncode == 0:
             logger.info(f"Video compression successful: {output_path}")
-            return True
+            return output_path
         else:
             logger.error(f"Video compression failed: {result.stderr}")
             # Clean up failed output file
@@ -196,7 +209,7 @@ async def compress_video_for_telegram(input_path: str, output_path: str) -> bool
                     logger.info(f"Cleaned up failed compression file: {output_path}")
                 except Exception as cleanup_e:
                     logger.warning(f"Failed to clean up {output_path}: {cleanup_e}")
-            return False
+            return None
     except subprocess.TimeoutExpired:
         logger.error("Video compression timed out")
         # Clean up incomplete compressed file after timeout
@@ -206,7 +219,7 @@ async def compress_video_for_telegram(input_path: str, output_path: str) -> bool
                 logger.info(f"Cleaned up timed-out compression file: {output_path}")
             except Exception as cleanup_e:
                 logger.warning(f"Failed to clean up timed-out file {output_path}: {cleanup_e}")
-        return False
+        return None
     except Exception as e:
         logger.error(f"Error during video compression: {e}")
         # Clean up any partial output file
@@ -216,7 +229,7 @@ async def compress_video_for_telegram(input_path: str, output_path: str) -> bool
                 logger.info(f"Cleaned up partial compression file: {output_path}")
             except Exception as cleanup_e:
                 logger.warning(f"Failed to clean up partial file {output_path}: {cleanup_e}")
-        return False
+        return None
 
 
 async def get_video_attributes_and_thumbnail(input_path: str) -> tuple:

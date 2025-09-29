@@ -62,18 +62,31 @@ class QueueManager:
     def _restore_queues(self):
         """Restore queues from persistent storage."""
         # Restore download queue
+        download_items_restored = 0
         for item in self.download_persistent.get_items():
             try:
                 self.download_queue.put_nowait(item)
+                download_items_restored += 1
             except asyncio.QueueFull:
                 logger.warning("Download queue full, skipping item")
         
         # Restore upload queue
+        upload_items_restored = 0
         for item in self.upload_persistent.get_items():
             try:
                 self.upload_queue.put_nowait(item)
+                upload_items_restored += 1
             except asyncio.QueueFull:
                 logger.warning("Upload queue full, skipping item")
+        
+        # Start processing tasks if we have items to process
+        if download_items_restored > 0:
+            logger.info(f"Restored {download_items_restored} download tasks, starting download processor")
+            self.download_task = asyncio.create_task(self._process_download_queue())
+        
+        if upload_items_restored > 0:
+            logger.info(f"Restored {upload_items_restored} upload tasks, starting upload processor")
+            self.upload_task = asyncio.create_task(self._process_upload_queue())
     
     async def add_download_task(self, task: dict):
         """Add a download task to the queue."""

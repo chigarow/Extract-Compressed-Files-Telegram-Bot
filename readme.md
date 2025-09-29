@@ -7,16 +7,17 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **User Account Based Access**: Uses a user account (not a bot token) for authentication, controlled by specifying a target username in the configuration.
 - **Automatic Extraction**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz.
 - **Direct Media Upload**: Send images/videos directly to the user account and they will be re-uploaded to the target user as media in the Media tab.
-- **Media Filtering**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm).
+- **Media Filtering**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm, and many others).
 - **Duplicate Detection**: Avoids reprocessing archives that have been previously processed by maintaining a cache of file hashes.
-- **Duplicate Detection for Direct Media**: Avoids reprocessing direct media uploads that have been previously processed by maintaining a cache of file hashes.
 - **Efficient Storage Management**: Deletes the original compressed file and the extracted files after uploading to save storage space.
 - **Password Protected Archive Support**: Handles password-protected archives with a simple command interface.
-- **Fast Video Compression**: Automatically compresses all video files to MP4 format optimized for Telegram streaming.
+- **Unsupported Video Format Conversion**: All unsupported video formats (.ts, .mkv, .avi, .mov, .wmv, .flv, and many others) are automatically converted to MP4 format to ensure proper playback in Telegram, even when transcoding is disabled.
 - **Proper Video Attributes**: Videos now have correct duration and thumbnail for proper display in Telegram (fixes black thumbnails and 00:00 duration).
-- **Unsupported Video Format Conversion**: All unsupported video formats (not just .ts) are automatically converted to MP4 format to ensure proper playback in Telegram, even when transcoding is disabled.
 - **Media Tab Support**: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
 - **Grouped Media Uploads**: Uploads images and videos as separate grouped albums with archive name as caption.
+- **Queue Management System**: Limits to 2 concurrent downloads and 2 concurrent uploads to prevent API rate limits, with all incoming files queued and processed according to the limits.
+- **Crash Recovery System**: Current processing state is saved to `current_process.json` every minute to persist across restarts, ensuring graceful recovery after crashes.
+- **Automatic Retry for Failed Operations**: Failed operations (due to FloodWaitError or other network issues) are automatically saved to `failed_operations.json` and retried every 30 minutes.
 - **FastTelethon Parallel Downloads**: Automatic 10-20x speed acceleration for large files using parallel MTProto connections.
 - **Optimized Download Speed**: Uses larger chunk sizes for Telegram Premium users to maximize download performance.
 - **Progress Tracking**: Provides real-time status updates during download, extraction, and upload processes.
@@ -73,7 +74,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 
     On Ubuntu/Debian:
     ```bash
-    sudo apt install p7zip-full unrar
+    sudo apt install p7zip-full unrar ffmpeg
     ```
 
 5.  **Run the script:**
@@ -109,15 +110,6 @@ In addition to processing compressed archives, you can now send images and video
 
 This feature is particularly useful when you want to optimize media files for Telegram or re-upload them to another account while ensuring they appear properly in the Media tab.
 
-### Duplicate Detection for Direct Media
-
-Similar to compressed archives, the script now implements duplicate detection for direct media uploads:
-
-- The script checks if a media file with the same name and exact size has been previously processed
-- If a match is found, the script skips downloading and uploading the file entirely
-- This saves bandwidth and processing time for identical media files
-- The duplicate detection uses SHA256 hashing for definitive verification after download
-
 ### Video Quality and Thumbnail Fixes
 
 The script now ensures videos have proper thumbnails and durations displayed in Telegram by:
@@ -127,6 +119,15 @@ The script now ensures videos have proper thumbnails and durations displayed in 
 - Setting correct duration and dimensions when uploading
 - Using proper video attributes (`DocumentAttributeVideo`) during upload
 - This resolves the common issue of black thumbnails and 00:00 duration display
+
+### Special Handling for .ts Files
+
+The script now includes special handling for MPEG Transport Stream (.ts) files:
+
+- .ts files are automatically converted to MP4 format regardless of the `TRANSCODE_ENABLED` setting
+- This ensures proper playback and streaming in Telegram, since Telegram's video player is optimized for MP4 files
+- Conversion uses the same optimized settings as regular video transcoding
+- This applies to both direct media uploads and videos extracted from archives
 
 ### Enhanced Video Format Support
 
@@ -138,15 +139,16 @@ The script now includes comprehensive support for various video formats:
 - This applies to both direct media uploads and videos extracted from archives
 - The script checks if videos are compatible with Telegram before uploading, and only converts when necessary to save processing time
 
-### Automatic Retry for Failed Operations
+### Grouped Media Uploads
 
-The script now includes robust error handling and automatic retry mechanisms:
+The script now uploads media files as grouped albums for better organization:
 
-- Failed operations (due to FloodWaitError or other network issues) are automatically saved to `failed_operations.json`
-- A background task runs every 30 minutes to retry failed operations
-- Each retry attempt is logged and tracked to prevent infinite retry loops
-- Operations involving FloodWaitError respect the required waiting periods
-- This ensures that temporary network issues or rate limits don't cause permanent failures
+- Images are uploaded first as a single grouped album
+- Videos are uploaded separately as another grouped album
+- Both groups use the archive filename (without extension) as the caption
+- Fallback to individual uploads if grouped upload fails
+
+This feature makes it easier to identify which files came from which archive.
 
 ### Queue Management System
 
@@ -166,18 +168,7 @@ The script now includes crash recovery to handle unexpected shutdowns gracefully
 - Current processing state is saved to `current_process.json` every minute
 - If the script crashes during a download or upload, the current process state is preserved
 - Upon restart, the script can resume from where it left off or handle incomplete operations appropriately
-- This prevents data loss and ensures reliable processing even in unstable environments
-
-### Grouped Media Uploads
-
-The script now uploads media files as grouped albums for better organization:
-
-- Images are uploaded first as a single grouped album
-- Videos are uploaded separately as another grouped album
-- Both groups use the archive filename (without extension) as the caption
-- Fallback to individual uploads if grouped upload fails
-
-This feature makes it easier to identify which files came from which archive.
+- This ensures that temporary network issues or rate limits don't cause permanent failures
 
 ### Fast Video Compression
 
@@ -243,23 +234,10 @@ The script provides several commands to cancel ongoing processes:
 - Reply with `/cancel-process` to cancel the entire process and delete any downloaded files
 - Reply with `/max_concurrent <number>` to dynamically change the maximum number of concurrent downloads
 
-### Additional Commands
-
-The script supports additional commands for managing the bot:
-
-- Reply with `/help` to show all available commands
-- Reply with `/status` to show the current status of the bot
-- Reply with `/battery-status` to show battery information (Termux only)
-- Reply with `/q` or `/queue` to show the current processing queue
-- Reply with `/pass <password>` to provide a password for a protected archive
-- Reply with `/toggle_fast_download` to enable/disable fast download
-- Reply with `/toggle_wifi_only` to enable/disable WiFi-Only mode
-- Reply with `/toggle_transcoding` to enable/disable video transcoding
-- Reply with `/set_max_archive_gb <number>` to set the maximum archive size in GB
-
 ### Checking Processing Status
 
 You can check the current processing status by sending `/queue` or `/q` to the script. The queue status now shows:
+
 - Currently processing files (download, extraction, or upload)
 - Password-protected archives waiting for input
 - Processing queue (files that have completed download and are waiting for extraction/upload)

@@ -148,13 +148,23 @@ class TestJsonSerialization(unittest.TestCase):
     
     def test_make_serializable_with_to_dict(self):
         """Test make_serializable with objects that have to_dict method."""
-        # Create a mock object with to_dict method
-        mock_obj = Mock()
-        mock_obj.to_dict.return_value = {"key": "value", "number": 42}
-        
-        result = make_serializable(mock_obj)
+        class CustomWithToDict:
+            def to_dict(self):
+                return {"key": "value", "number": 42}
+        obj = CustomWithToDict()
+        result = make_serializable(obj)
         self.assertEqual(result, {"key": "value", "number": 42})
-        mock_obj.to_dict.assert_called_once()
+
+    def test_make_serializable_to_dict_with_datetime(self):
+        """Ensure datetimes inside to_dict output are converted recursively."""
+        ts = datetime.datetime(2025, 9, 29, 18, 0, 0)
+        class CustomWithDT:
+            def to_dict(self):
+                return {"created": ts, "nested": {"when": ts}}
+        obj = CustomWithDT()
+        result = make_serializable(obj)
+        self.assertEqual(result["created"], ts.isoformat())
+        self.assertEqual(result["nested"]["when"], ts.isoformat())
     
     def test_make_serializable_with_failing_to_dict(self):
         """Test make_serializable when to_dict method fails."""

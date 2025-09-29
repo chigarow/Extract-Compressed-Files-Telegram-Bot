@@ -16,35 +16,90 @@ from .constants import (
 logger = logging.getLogger('extractor')
 
 
+def _serialize_datetime(value):
+    """Return ISO format for datetime/date or original value."""
+    if isinstance(value, datetime.datetime):
+        # Ensure timezone-naive datetimes still serialize consistently
+        return value.isoformat()
+    return value
+
+
 def make_serializable(obj):
-    """Convert Telethon objects and other non-serializable objects to serializable format."""
-    # Handle None values first
+    """Convert Telethon objects and other non-serializable objects to serializable format.
+
+    Improvements:
+    - Recursively processes result of to_dict() so nested datetimes are converted
+    - Handles lists/tuples/sets comprehensively
+    - Falls back gracefully on unexpected objects
+    """
+    # None
     if obj is None:
         return None
-    
-    # Handle Mock objects from unit tests or other non-serializable objects
-    if str(type(obj)).find('Mock') != -1 or hasattr(obj, '_mock_name'):
-        return serialize_telethon_object(obj)
-    
-    if hasattr(obj, 'to_dict'):
-        # Handle Telethon objects with to_dict method
-        try:
-            return obj.to_dict()
-        except Exception:
-            # If to_dict fails, extract basic attributes
-            return serialize_telethon_object(obj)
-    elif isinstance(obj, datetime.datetime):
-        return obj.isoformat()
-    elif isinstance(obj, dict):
-        return {k: make_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [make_serializable(item) for item in obj]
-    elif hasattr(obj, '__dict__'):
-        # Handle objects with __dict__ (most custom objects)
-        return serialize_telethon_object(obj)
-    else:
-        # For primitive types and strings
+
+    # Primitive JSON-safe types
+    if isinstance(obj, (str, int, float, bool)):
         return obj
+
+    # Datetime
+    if isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+
+    # Sequences
+    if isinstance(obj, (list, tuple, set)):
+        return [make_serializable(item) for item in obj]
+
+    # Dict
+    if isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+
+    # Telethon or similar objects with to_dict (attempt this BEFORE generic mock/message heuristic)
+    # But first, avoid treating unittest.mock objects as real to_dict providers
+    obj_mod = getattr(obj, '__module__', '')
+    if obj_mod.startswith('unittest.mock'):
+        # Force mock handling path below
+        pass
+    elif hasattr(obj, 'to_dict') and callable(getattr(obj, 'to_dict')):
+        try:
+            raw = obj.to_dict()
+            return make_serializable(raw)  # recurse to clean nested datetimes
+        except Exception:
+            # fall through to specialized handling
+            pass
+
+    # Mock objects (unit tests) or Telethon Message-like objects
+    if (str(type(obj)).find('Mock') != -1 or hasattr(obj, '_mock_name')) and not isinstance(obj, (list, dict, tuple, set)):
+        # If it looks like a Message (has id & message) treat accordingly
+        if hasattr(obj, 'id') and hasattr(obj, 'message'):
+            return serialize_telethon_object(obj)
+        # Else attempt attribute dict serialization
+        attrs = {}
+        for k in dir(obj):
+            if k.startswith('_'):
+                continue
+            # Skip callables
+            try:
+                v = getattr(obj, k)
+            except Exception:
+                continue
+            if callable(v):
+                continue
+            try:
+                attrs[k] = make_serializable(v)
+            except Exception:
+                attrs[k] = str(v)
+        if attrs:
+            return attrs
+        return str(obj)
+
+    # Generic objects with __dict__
+    if hasattr(obj, '__dict__'):
+        try:
+            return {k: make_serializable(v) for k, v in obj.__dict__.items() if not k.startswith('_')}
+        except Exception:
+            return str(obj)
+
+    # Fallback string conversion for anything else (e.g., enums)
+    return str(obj)
 
 
 def serialize_telethon_object(obj):

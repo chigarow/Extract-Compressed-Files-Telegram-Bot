@@ -258,3 +258,14 @@ def event_loop():
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
+
+# Shared temp_dir fixture for tests that expect it in multiple classes
+@pytest.fixture
+def temp_dir():
+    """Provide a temporary directory path and clean it up after use."""
+    import tempfile, shutil
+    d = tempfile.mkdtemp(prefix="suite_tmp_")
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)

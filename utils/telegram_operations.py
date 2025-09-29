@@ -274,8 +274,11 @@ class TelegramOperations:
         return progress_callback
 
 
-def create_download_progress_callback(status_msg, download_status, start_time):
-    """Create a progress callback for download operations."""
+def create_download_progress_callback(status_msg, download_status, start_time, filename: str = None):
+    """Create a progress callback for download operations.
+
+    Adds filename and instantaneous speed to the edited message.
+    """
     last_report = {'pct': -1, 'time': time.time(), 'last_edit_pct': -1, 'last_edit_time': time.time()}
     speed_window = []  # (timestamp, bytes)
     
@@ -319,7 +322,11 @@ def create_download_progress_callback(status_msg, download_status, start_time):
             last_report['time'] = now
         
         if should_edit:
-            txt = f'⬇️ Download {pct}% | ETA {format_eta(eta)} | {human_size(downloaded)} / {human_size(total)}'
+            name_part = f'{filename} | ' if filename else ''
+            txt = (
+                f'⬇️ {name_part}Download {pct}% | {speed_h} | ETA {format_eta(eta)} | '
+                f'{human_size(downloaded)} / {human_size(total)}'
+            )
             asyncio.create_task(_safe_edit_message(status_msg, txt))
             last_report['last_edit_pct'] = pct
             last_report['last_edit_time'] = now

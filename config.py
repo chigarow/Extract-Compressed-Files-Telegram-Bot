@@ -46,6 +46,9 @@ class Config:
         self.fast_download_enabled = self._getboolean('FAST_DOWNLOAD_ENABLED', True)
         self.fast_download_connections = self._getint('FAST_DOWNLOAD_CONNECTIONS', 8)
         self.wifi_only_mode = self._getboolean('WIFI_ONLY_MODE', True)
+        # Video compression timeout (seconds). Default 300 (5 minutes)
+        # Can be overridden in secrets.properties via COMPRESSION_TIMEOUT_SECONDS
+        self.compression_timeout_seconds = self._getint('COMPRESSION_TIMEOUT_SECONDS', 300)
 
     def _get(self, key, fallback=None):
         return self._config.get('DEFAULT', key, fallback=fallback)

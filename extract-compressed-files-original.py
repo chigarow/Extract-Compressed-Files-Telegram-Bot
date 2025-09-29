@@ -476,7 +476,23 @@ async def compress_video_for_telegram(input_path: str, output_path: str) -> bool
         
         logger.info(f"Compressing video: {input_path} -> {output_path}")
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=300))  # 5 min timeout
+        # Use configurable compression timeout from config (fallback to 300 seconds)
+        timeout_val = getattr(config, 'compression_timeout_seconds', 300)
+        try:
+            timeout_int = int(timeout_val)
+            if timeout_int <= 0:
+                timeout_int = 300
+        except Exception:
+            timeout_int = 300
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_int
+            )
+        )
         
         if result.returncode == 0:
             logger.info(f"Video compression successful: {output_path}")
@@ -1814,8 +1830,48 @@ async def handle_help_command(event):
         f"**/toggle_fast_download** - Enable/disable fast download\n"
         f"**/toggle_wifi_only** - Enable/disable WiFi-Only mode\n"
         f"**/toggle_transcoding** - Enable/disable video transcoding\n"
+        f"**/compression-timeout <value>** - Set compression timeout (e.g., 5m, 120m, 300s)\n"
     )
     await event.reply(help_message)
+
+def parse_timeout_value(raw: str) -> int:
+    raw = raw.strip().lower()
+    if raw.isdigit():
+        return int(raw)
+    multipliers = {'s': 1, 'm': 60, 'h': 3600}
+    for suffix, mult in multipliers.items():
+        if raw.endswith(suffix):
+            num_part = raw[:-1]
+            if not num_part.isdigit():
+                raise ValueError('Invalid numeric value')
+            return int(num_part) * mult
+    # Composite like 1h30m
+    import re
+    pattern = re.compile(r'(\d+)([smh])')
+    matches = list(pattern.finditer(raw))
+    if matches:
+        consumed = ''.join(m.group(0) for m in matches)
+        if consumed == raw:
+            total = 0
+            for m in matches:
+                total += int(m.group(1)) * multipliers[m.group(2)]
+            if total > 0:
+                return total
+    raise ValueError('Invalid timeout format')
+
+async def handle_compression_timeout_command(event, value: str):
+    try:
+        seconds = parse_timeout_value(value)
+        if seconds <= 0:
+            raise ValueError('Timeout must be positive')
+        if 'DEFAULT' not in config._config:
+            config._config['DEFAULT'] = {}
+        config._config['DEFAULT']['COMPRESSION_TIMEOUT_SECONDS'] = str(seconds)
+        config.save()
+        config.compression_timeout_seconds = seconds
+        await event.reply(f'✅ Compression timeout set to {seconds}s.')
+    except ValueError as e:
+        await event.reply(f'❌ Invalid timeout value: {value}. Use forms like 300, 5m, 2h, 1h30m. ({e})')
 
 
 async def handle_battery_status_command(event):
@@ -2496,6 +2552,13 @@ async def watcher(event):
             return
         if txt == '/toggle_transcoding':
             await handle_toggle_transcoding_command(event)
+            return
+        if txt.startswith('/compression-timeout '):
+            parts = txt.split(maxsplit=1)
+            if len(parts) == 2:
+                await handle_compression_timeout_command(event, parts[1])
+            else:
+                await event.reply('Usage: /compression-timeout <value>, e.g., 5m or 300s')
             return
         if txt == '/help':
             await handle_help_command(event)

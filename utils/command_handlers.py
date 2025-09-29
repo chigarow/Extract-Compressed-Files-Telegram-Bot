@@ -232,8 +232,57 @@ async def handle_help_command(event):
         f"**/toggle_fast_download** - Enable/disable fast download\n"
         f"**/toggle_wifi_only** - Enable/disable WiFi-Only mode\n"
         f"**/toggle_transcoding** - Enable/disable video transcoding\n"
+        f"**/compression-timeout <value>** - Set compression timeout (e.g., 5m, 120m, 300s)\n"
     )
     await event.reply(help_message)
+
+
+def _parse_timeout_value(raw: str) -> int:
+    """Parse a timeout value supporting suffixes:
+    Examples: '300' -> 300 seconds, '5m' -> 300, '2h' -> 7200, '120m' -> 7200, '30s' -> 30.
+    Returns integer seconds, raises ValueError on invalid input.
+    """
+    raw = raw.strip().lower()
+    if raw.isdigit():
+        return int(raw)
+    multipliers = {'s': 1, 'm': 60, 'h': 3600}
+    for suffix, mult in multipliers.items():
+        if raw.endswith(suffix):
+            num_part = raw[:-1]
+            if not num_part.isdigit():
+                raise ValueError('Invalid numeric value')
+            return int(num_part) * mult
+    # Also allow formats like '1h30m'
+    total = 0
+    import re
+    pattern = re.compile(r'(\d+)([smh])')
+    matches = list(pattern.finditer(raw))
+    if matches:
+        consumed = ''.join(m.group(0) for m in matches)
+        if consumed == raw:
+            for m in matches:
+                total += int(m.group(1)) * multipliers[m.group(2)]
+            if total > 0:
+                return total
+    raise ValueError('Invalid timeout format')
+
+
+async def handle_compression_timeout_command(event, value: str):
+    """Handle /compression-timeout command to adjust ffmpeg compression timeout."""
+    from config import config
+    try:
+        seconds = _parse_timeout_value(value)
+        if seconds <= 0:
+            raise ValueError('Timeout must be positive')
+        # Persist to config
+        if 'DEFAULT' not in config._config:
+            config._config['DEFAULT'] = {}
+        config._config['DEFAULT']['COMPRESSION_TIMEOUT_SECONDS'] = str(seconds)
+        config.save()
+        config.compression_timeout_seconds = seconds
+        await event.reply(f'✅ Compression timeout set to {seconds}s.')
+    except ValueError as e:
+        await event.reply(f'❌ Invalid timeout value: {value}. Use forms like 300, 5m, 2h, 1h30m. ({e})')
 
 
 async def handle_battery_status_command(event):

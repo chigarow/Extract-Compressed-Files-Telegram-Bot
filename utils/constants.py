@@ -41,6 +41,7 @@ TRANSCODE_ENABLED = config.transcode_enabled
 FAST_DOWNLOAD_ENABLED = config.fast_download_enabled
 FAST_DOWNLOAD_CONNECTIONS = config.fast_download_connections
 WIFI_ONLY_MODE = config.wifi_only_mode
+COMPRESSION_TIMEOUT_SECONDS = getattr(config, 'compression_timeout_seconds', 300)
 
 # File paths
 LOG_FILE = os.path.join(DATA_DIR, 'app.log')

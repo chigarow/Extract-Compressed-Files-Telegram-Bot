@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import asyncio
 import logging
-from .constants import TRANSCODE_ENABLED
+from .constants import TRANSCODE_ENABLED, COMPRESSION_TIMEOUT_SECONDS
 
 logger = logging.getLogger('extractor')
 
@@ -173,7 +173,16 @@ async def compress_video_for_telegram(input_path: str, output_path: str) -> bool
         
         logger.info(f"Compressing video: {input_path} -> {output_path}")
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=300))  # 5 min timeout
+        timeout_val = COMPRESSION_TIMEOUT_SECONDS if isinstance(COMPRESSION_TIMEOUT_SECONDS, int) and COMPRESSION_TIMEOUT_SECONDS > 0 else 300
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_val
+            )
+        )
         
         if result.returncode == 0:
             logger.info(f"Video compression successful: {output_path}")

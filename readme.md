@@ -148,6 +148,26 @@ The script now includes robust error handling and automatic retry mechanisms:
 - Operations involving FloodWaitError respect the required waiting periods
 - This ensures that temporary network issues or rate limits don't cause permanent failures
 
+### Queue Management System
+
+The script now includes a comprehensive queue management system to control resource usage:
+
+- Download queue: Limits to 2 concurrent downloads to prevent API rate limits
+- Upload queue: Limits to 2 concurrent uploads to prevent API rate limits
+- All incoming files are queued and processed according to the limits
+- Queue status is reported to the user with position information
+- Queued operations are persisted to files (`download_queue.json` and `upload_queue.json`) and restored on restart
+- This ensures stable performance even with high volume file traffic
+
+### Crash Recovery System
+
+The script now includes crash recovery to handle unexpected shutdowns gracefully:
+
+- Current processing state is saved to `current_process.json` every minute
+- If the script crashes during a download or upload, the current process state is preserved
+- Upon restart, the script can resume from where it left off or handle incomplete operations appropriately
+- This prevents data loss and ensures reliable processing even in unstable environments
+
 ### Grouped Media Uploads
 
 The script now uploads media files as grouped albums for better organization:

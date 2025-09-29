@@ -136,6 +136,142 @@ ongoing_operations = {
     'status': None        # track current status message
 }
 
+# Queue management
+DOWNLOAD_QUEUE_FILE = os.path.join(DATA_DIR, 'download_queue.json')
+UPLOAD_QUEUE_FILE = os.path.join(DATA_DIR, 'upload_queue.json')
+CURRENT_PROCESS_FILE = os.path.join(DATA_DIR, 'current_process.json')
+
+# Semaphores to control concurrent downloads and uploads
+download_semaphore = asyncio.Semaphore(2)  # Allow max 2 concurrent downloads
+upload_semaphore = asyncio.Semaphore(2)    # Allow max 2 concurrent uploads
+
+# Download and upload queues
+download_queue = asyncio.Queue()
+upload_queue = asyncio.Queue()
+
+# Track current processes
+current_download_process = None
+current_upload_process = None
+
+# Load existing queues from file
+if os.path.exists(DOWNLOAD_QUEUE_FILE):
+    try:
+        with open(DOWNLOAD_QUEUE_FILE, 'r') as f:
+            download_queue_items = json.load(f)
+        for item in download_queue_items:
+            download_queue.put_nowait(item)
+    except Exception:
+        pass
+
+if os.path.exists(UPLOAD_QUEUE_FILE):
+    try:
+        with open(UPLOAD_QUEUE_FILE, 'r') as f:
+            upload_queue_items = json.load(f)
+        for item in upload_queue_items:
+            upload_queue.put_nowait(item)
+    except Exception:
+        pass
+
+# Load current processes from file
+if os.path.exists(CURRENT_PROCESS_FILE):
+    try:
+        with open(CURRENT_PROCESS_FILE, 'r') as f:
+            current_processes = json.load(f)
+            current_download_process = current_processes.get('current_download_process')
+            current_upload_process = current_processes.get('current_upload_process')
+    except Exception:
+        pass
+
+async def save_current_processes():
+    """Save current processes to file periodically to persist across restarts"""
+    while True:
+        try:
+            # Save current processes
+            current_processes = {
+                'current_download_process': current_download_process,
+                'current_upload_process': current_upload_process
+            }
+            
+            with open(CURRENT_PROCESS_FILE, 'w') as f:
+                json.dump(current_processes, f, indent=2)
+            
+            # Wait 1 minute before next save
+            await asyncio.sleep(60)
+        except Exception as e:
+            logger.error(f'Error saving current processes: {e}')
+            await asyncio.sleep(10)  # Wait 10 seconds before retrying on error
+
+
+async def save_queues():
+    """Save queues to files periodically to persist across restarts"""
+    while True:
+        try:
+            # Save download queue
+            download_items = []
+            temp_list = []
+            while not download_queue.empty():
+                try:
+                    item = download_queue.get_nowait()
+                    temp_list.append(item)
+                except asyncio.QueueEmpty:
+                    break
+            
+            # Put items back in queue and create serializable version
+            for item in temp_list:
+                download_queue.put_nowait(item)
+                # We need to handle the event object specially, so we just store the minimal data
+                serialized_item = {k: v for k, v in item.items() if k != 'event'}
+                download_items.append(serialized_item)
+            
+            with open(DOWNLOAD_QUEUE_FILE, 'w') as f:
+                json.dump(download_items, f, indent=2)
+            
+            # Save upload queue
+            upload_items = []
+            temp_list = []
+            while not upload_queue.empty():
+                try:
+                    item = upload_queue.get_nowait()
+                    temp_list.append(item)
+                except asyncio.QueueEmpty:
+                    break
+            
+            # Put items back in queue and create serializable version
+            for item in temp_list:
+                upload_queue.put_nowait(item)
+                # We need to handle the event object specially, so we just store the minimal data
+                serialized_item = {k: v for k, v in item.items() if k != 'event'}
+                upload_items.append(serialized_item)
+            
+            with open(UPLOAD_QUEUE_FILE, 'w') as f:
+                json.dump(upload_items, f, indent=2)
+            
+            # Wait 5 minutes before next save
+            await asyncio.sleep(300)
+        except Exception as e:
+            logger.error(f'Error saving queues: {e}')
+            await asyncio.sleep(60)  # Wait 1 minute before retrying on error
+
+
+async def save_current_processes():
+    """Save current processes to file periodically to persist across restarts"""
+    while True:
+        try:
+            # Save current processes
+            current_processes = {
+                'current_download_process': current_download_process,
+                'current_upload_process': current_upload_process
+            }
+            
+            with open(CURRENT_PROCESS_FILE, 'w') as f:
+                json.dump(current_processes, f, indent=2)
+            
+            # Wait 1 minute before next save
+            await asyncio.sleep(60)
+        except Exception as e:
+            logger.error(f'Error saving current processes: {e}')
+            await asyncio.sleep(10)  # Wait 10 seconds before retrying on error
+
 # Track cancelled operations by filename to properly interrupt downloads
 cancelled_operations = set()
 
@@ -772,7 +908,7 @@ async def get_video_attributes_and_thumbnail(input_path: str) -> tuple:
 
 
 async def process_direct_media_upload(event, file_path: str, filename: str):
-    """Process direct media upload (images or videos) to target user"""
+    """Add direct media upload task to the upload queue"""
     try:
         # Check if we've already processed a file with the same name and exact size
         # Since the size is exact, this is a reliable indicator that it's the same file
@@ -795,9 +931,6 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
             
             return
 
-        await event.reply(f'📤 Uploading media file: {filename}')
-        target = await ensure_target_entity()
-        
         # Update cache with the new file information (but only after successful upload)
         file_hash = None
         try:
@@ -815,6 +948,63 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
                 return
         except Exception as e:
             logger.warning(f'Hashing failed (continuing): {e}')
+        
+        # Add to upload queue instead of processing immediately
+        upload_task = {
+            'event': event,
+            'file_path': file_path,
+            'filename': filename,
+            'file_hash': file_hash,
+            'size_bytes': size_bytes
+        }
+        
+        await upload_queue.put(upload_task)
+        await event.reply(f'📋 Queue: Media {filename} added to upload queue. Queue position: {upload_queue.qsize()}.')
+        
+        # Start the upload queue processor if it's not already running
+        global upload_queue_task
+        if 'upload_queue_task' not in globals() or upload_queue_task.done():
+            logger.info('Starting upload queue processor')
+            upload_queue_task = asyncio.create_task(process_upload_queue())
+            
+    except Exception as e:
+        logger.error(f'Error queuing media upload {filename}: {e}')
+        await event.reply(f'❌ Error queuing upload for {filename}: {e}')
+
+
+async def process_upload_queue():
+    """Process files from the upload queue with limited concurrency"""
+    while True:
+        try:
+            # Get the next file to upload from the queue
+            upload_task = await upload_queue.get()
+            
+            # Use the upload semaphore to limit concurrent uploads
+            async with upload_semaphore:
+                await execute_upload_task(upload_task)
+                upload_queue.task_done()
+                
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f'Error in upload queue processor: {e}')
+        # Continue processing other items in the queue
+
+
+async def execute_upload_task(upload_task):
+    """Execute a single upload task with proper error handling"""
+    event = upload_task['event']
+    file_path = upload_task['file_path']
+    filename = upload_task['filename']
+    file_type = upload_task.get('file_type', 'direct')  # 'direct', 'image', or 'video'
+    is_from_archive = upload_task.get('is_from_archive', False)
+    
+    # Get optional parameters for archive uploads
+    download_status = upload_task.get('download_status')
+    
+    try:
+        await event.reply(f'📤 Uploading media file: {filename}')
+        target = await ensure_target_entity()
         
         # Create progress callback for upload
         upload_status_msg = await event.reply('Starting upload...')
@@ -850,47 +1040,112 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
             await client.send_file(target, file_path, caption=filename, force_document=False, 
                                    progress_callback=create_progress_callback(filename))
         elif ext in VIDEO_EXTENSIONS:
-            # Check if video needs processing for Telegram compatibility
-            should_process = needs_video_processing(file_path)
-            
-            if should_process:
-                # Compress video to MP4 format for better Telegram streaming
-                compressed_path = os.path.splitext(file_path)[0] + '_compressed.mp4'
-                if await compress_video_for_telegram(file_path, compressed_path):
-                    # Get attributes for the compressed video
-                    duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(compressed_path)
-                    
-                    # Import needed for video attributes
-                    from telethon.tl.types import DocumentAttributeVideo
-                    
-                    # Upload with proper video attributes
-                    await client.send_file(
-                        target, 
-                        compressed_path, 
-                        caption=filename,
-                        force_document=False,
-                        supports_streaming=True,
-                        progress_callback=create_progress_callback(filename),
-                        attributes=[
-                            DocumentAttributeVideo(
-                                duration=duration,
-                                w=width,
-                                h=height,
-                                supports_streaming=True
-                            )
-                        ],
-                        thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
-                    )
-                    
-                    # Clean up compressed file and thumbnail
+            # For archive-extracted videos, parameters may already be processed
+            if is_from_archive:
+                original_path = upload_task.get('original_path', file_path)
+                thumbnail_path = None  # Generate new thumbnail for the actual file being uploaded
+                
+                # Get attributes for the video file (could be original or compressed)
+                duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
+                
+                # Import needed for video attributes
+                from telethon.tl.types import DocumentAttributeVideo
+                
+                # Upload with proper video attributes
+                await client.send_file(
+                    target, 
+                    file_path, 
+                    caption=os.path.basename(original_path),
+                    force_document=False,
+                    supports_streaming=True,
+                    progress_callback=create_progress_callback(os.path.basename(original_path)),
+                    attributes=[
+                        DocumentAttributeVideo(
+                            duration=duration,
+                            w=width,
+                            h=height,
+                            supports_streaming=True
+                        )
+                    ],
+                    thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                )
+                
+                # Clean up thumbnail after upload
+                if thumbnail_path and os.path.exists(thumbnail_path):
                     try:
-                        os.remove(compressed_path)
-                        if thumbnail_path and os.path.exists(thumbnail_path):
-                            os.remove(thumbnail_path)
+                        os.remove(thumbnail_path)
                     except:
                         pass
+            else:
+                # For direct uploads, follow the regular process
+                # Check if video needs processing for Telegram compatibility
+                should_process = needs_video_processing(file_path)
+                
+                if should_process:
+                    # Compress video to MP4 format for better Telegram streaming
+                    compressed_path = os.path.splitext(file_path)[0] + '_compressed.mp4'
+                    if await compress_video_for_telegram(file_path, compressed_path):
+                        # Get attributes for the compressed video
+                        duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(compressed_path)
+                        
+                        # Import needed for video attributes
+                        from telethon.tl.types import DocumentAttributeVideo
+                        
+                        # Upload with proper video attributes
+                        await client.send_file(
+                            target, 
+                            compressed_path, 
+                            caption=filename,
+                            force_document=False,
+                            supports_streaming=True,
+                            progress_callback=create_progress_callback(filename),
+                            attributes=[
+                                DocumentAttributeVideo(
+                                    duration=duration,
+                                    w=width,
+                                    h=height,
+                                    supports_streaming=True
+                                )
+                            ],
+                            thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                        )
+                        
+                        # Clean up compressed file and thumbnail
+                        try:
+                            os.remove(compressed_path)
+                            if thumbnail_path and os.path.exists(thumbnail_path):
+                                os.remove(thumbnail_path)
+                        except:
+                            pass
+                    else:
+                        # If compression fails, upload original file
+                        duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
+                        
+                        from telethon.tl.types import DocumentAttributeVideo
+                        
+                        await client.send_file(
+                            target, 
+                            file_path, 
+                            caption=filename,
+                            force_document=False,
+                            supports_streaming=True,
+                            progress_callback=create_progress_callback(filename),
+                            attributes=[
+                                DocumentAttributeVideo(
+                                    duration=duration,
+                                    w=width,
+                                    h=height,
+                                    supports_streaming=True
+                                )
+                            ],
+                            thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                        )
+                        
+                        # Clean up thumbnail
+                        if thumbnail_path and os.path.exists(thumbnail_path):
+                            os.remove(thumbnail_path)
                 else:
-                    # If compression fails, upload original file
+                    # Upload video as-is when transcoding is disabled or not needed
                     duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
                     
                     from telethon.tl.types import DocumentAttributeVideo
@@ -916,45 +1171,28 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
                     # Clean up thumbnail
                     if thumbnail_path and os.path.exists(thumbnail_path):
                         os.remove(thumbnail_path)
-            else:
-                # Upload video as-is when transcoding is disabled or not needed
-                duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
-                
-                from telethon.tl.types import DocumentAttributeVideo
-                
-                await client.send_file(
-                    target, 
-                    file_path, 
-                    caption=filename,
-                    force_document=False,
-                    supports_streaming=True,
-                    progress_callback=create_progress_callback(filename),
-                    attributes=[
-                        DocumentAttributeVideo(
-                            duration=duration,
-                            w=width,
-                            h=height,
-                            supports_streaming=True
-                        )
-                    ],
-                    thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
-                )
-                
-                # Clean up thumbnail
-                if thumbnail_path and os.path.exists(thumbnail_path):
-                    os.remove(thumbnail_path)
         
-        # Update cache after successful upload
-        if file_hash:
-            processed_cache[file_hash] = {
-                'filename': filename,
-                'time': int(time.time()),
-                'size': size_bytes
-            }
-            await save_cache()
+        # Update download status if this is from an archive
+        if is_from_archive and download_status:
+            download_status['uploaded_files'] = download_status.get('uploaded_files', 0) + 1
+            total_files = download_status.get('total_files', 1)
+            await event.reply(f'✅ Uploaded {os.path.basename(filename)}. Progress: {download_status["uploaded_files"]}/{total_files}')
+        
+        # For direct uploads, update cache if hash was provided
+        if not is_from_archive:
+            file_hash = upload_task.get('file_hash')
+            size_bytes = upload_task.get('size_bytes')
+            if file_hash and size_bytes:
+                processed_cache[file_hash] = {
+                    'filename': filename,
+                    'time': int(time.time()),
+                    'size': size_bytes
+                }
+                await save_cache()
         
         await upload_status_msg.edit(f'✅ Upload complete: {filename}')
-        await event.reply(f'✅ Media file {filename} successfully uploaded to {TARGET_USERNAME}')
+        if not is_from_archive:  # Only send final success for direct uploads
+            await event.reply(f'✅ Media file {filename} successfully uploaded to {TARGET_USERNAME}')
         
     except Exception as e:
         logger.error(f'Error uploading media file {filename}: {e}')
@@ -973,7 +1211,7 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
         
         # Add to failed operations for retry
         failed_operation = {
-            'type': 'direct_media_upload',
+            'type': 'direct_media_upload' if not is_from_archive else 'archive_extracted_upload',
             'filename': filename,
             'file_path': file_path,
             'error': error_msg,
@@ -1188,125 +1426,81 @@ async def process_extract_and_upload(download_status):
         target = await ensure_target_entity()
         sent = 0
         
-        # --- Upload Progress Tracking ---
-        upload_status_msg = await event.reply('Starting upload...')
+        # Add all media files to upload queue
+        total_files = len(image_files) + len(video_files)
+        await event.reply(f'📤 Found {len(media_files)} media files ({len(image_files)} images, {len(video_files)} videos). Adding to upload queue...')
         
-        def create_progress_callback(file_type):
-            start_time = time.time()
-            last_edit_pct = [-5]  # Use a list to be mutable in inner scope
-            last_edit_time = [0]
-
-            async def upload_progress(current, total):
-                pct = int(current * 100 / total) if total > 0 else 0
-                now = time.time()
-
-                elapsed = now - start_time
-                speed = current / elapsed if elapsed > 0 else 0
-                eta = (total - current) / speed if speed > 0 else float('inf')
-
-                if (pct >= last_edit_pct[0] + 5) or ((now - last_edit_time[0]) > 5):
-                    txt = f'📤 Uploading {file_type}: {pct}% | {human_size(speed)}/s | ETA: {format_eta(eta)}'
-                    try:
-                        await upload_status_msg.edit(txt)
-                    except:
-                        pass
-                    last_edit_pct[0] = pct
-                    last_edit_time[0] = now
-            return upload_progress
-
-        # Upload images individually to ensure they appear in Media tab
+        # Counter for tracking sent files
+        sent = 0
+        
+        # Add images to the upload queue
         for path in image_files:
-            try:
-                await client.send_file(target, path, caption=os.path.basename(path), force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
-                sent += 1
-                download_status['uploaded_files'] = sent
-                logger.info(f'Sent image: {path}')
-            except Exception as e:
-                logger.error(f'Failed to send {path}: {e}')
-                await event.reply(f'Error sending {os.path.basename(path)}: {e}')
+            upload_task = {
+                'event': event,
+                'file_path': path,
+                'filename': os.path.basename(path),
+                'file_type': 'image',
+                'is_from_archive': True,
+                'download_status': download_status
+            }
+            
+            await upload_queue.put(upload_task)
+            logger.info(f'Added image to upload queue: {path}')
         
-        # Upload videos individually with proper attributes to ensure they appear in Media tab
+        # Add videos to the upload queue
         compressed_video_paths = []  # Keep track of compressed files for cleanup
         for path in video_files:
             original_path = path
             ext = os.path.splitext(path)[1].lower()
             
-            try:
-                # Validate video file before processing
-                video_info = validate_video_file(path)
-                
-                # Check if video needs processing - always convert .ts files regardless of TRANSCODE_ENABLED setting
-                should_transcode = TRANSCODE_ENABLED and needs_video_processing(path)
-                is_ts_file = ext == '.ts'  # Always convert .ts files to MP4 for proper Telegram compatibility
-                
-                if should_transcode or is_ts_file:
-                    # Compress all video files to MP4 format for better Telegram streaming
-                    compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
-                    if await compress_video_for_telegram(path, compressed_path):
-                        # Validate compressed video as well
-                        compressed_info = validate_video_file(compressed_path)
-                        # If compression is successful, use the compressed file
-                        path = compressed_path
-                        compressed_video_paths.append(compressed_path)
-                    else:
-                        # If compression fails, use the original file
-                        path = original_path
+            # Check if video needs processing
+            should_transcode = TRANSCODE_ENABLED and needs_video_processing(path)
+            is_ts_file = ext == '.ts'  # Always convert .ts files to MP4 for proper Telegram compatibility
+            
+            if should_transcode or is_ts_file:
+                # Compress all video files to MP4 format for better Telegram streaming
+                compressed_path = os.path.splitext(path)[0] + '_compressed.mp4'
+                if await compress_video_for_telegram(path, compressed_path):
+                    # If compression is successful, use the compressed file
+                    path = compressed_path
+                    compressed_video_paths.append(compressed_path)
                 else:
-                    # Use videos as-is when compression is disabled or not needed
+                    # If compression fails, use the original file
                     path = original_path
-                
-                # Get video attributes and thumbnail
-                duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(path)
-                
-                # Import needed for video attributes
-                from telethon.tl.types import DocumentAttributeVideo
-                
-                # Upload with proper video attributes
-                await client.send_file(
-                    target, 
-                    path, 
-                    caption=os.path.basename(original_path),
-                    force_document=False,
-                    supports_streaming=True,
-                    progress_callback=create_progress_callback(os.path.basename(original_path)),
-                    attributes=[
-                        DocumentAttributeVideo(
-                            duration=duration,
-                            w=width,
-                            h=height,
-                            supports_streaming=True
-                        )
-                    ],
-                    thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
-                )
-                
-                sent += 1
-                download_status['uploaded_files'] = sent
-                
-                # Clean up thumbnail after upload
-                if thumbnail_path and os.path.exists(thumbnail_path):
-                    try:
-                        os.remove(thumbnail_path)
-                    except:
-                        pass
-                        
-            except Exception as e:
-                logger.error(f'Failed to send video {original_path}: {e}')
-                await event.reply(f'Error sending video {os.path.basename(original_path)}: {e}')
+            else:
+                # Use videos as-is when compression is disabled or not needed
+                path = original_path
+            
+            upload_task = {
+                'event': event,
+                'file_path': path,
+                'filename': os.path.basename(original_path),
+                'file_type': 'video',
+                'is_from_archive': True,
+                'thumbnail_path': None,  # Will be generated during upload
+                'original_path': original_path,
+                'compressed_path': path if path != original_path else None,
+                'download_status': download_status
+            }
+            
+            await upload_queue.put(upload_task)
+            logger.info(f'Added video to upload queue: {original_path}')
         
-        logger.info(f'Sent {len(video_files)} videos individually with proper attributes')
+        # Also update the status message to show queue status instead of direct upload progress
+        await event.reply(f'📋 Queue: Added {total_files} files to upload queue. Uploads will start shortly...')
         
-        # Clean up compressed video files
+        # Start the upload queue processor if it's not already running
+        if 'upload_queue_task' not in globals() or upload_queue_task.done():
+            logger.info('Starting upload queue processor')
+            upload_queue_task = asyncio.create_task(process_upload_queue())
+        
+        # Clean up compressed video files after all uploads
         for compressed_path in compressed_video_paths:
             try:
-                os.remove(compressed_path)
+                if os.path.exists(compressed_path):
+                    os.remove(compressed_path)
             except:
                 pass
-        
-        await upload_status_msg.edit(f'✅ Upload complete: {sent}/{len(media_files)} files sent.')
-        
-        # Clear upload task
-        ongoing_operations['upload'] = None
 
     # Update cache
     if file_hash:
@@ -2165,6 +2359,76 @@ async def schedule_retry_task():
             await asyncio.sleep(300)  # Wait 5 minutes before retrying the task itself
 
 
+async def process_download_queue():
+    """Process files from the download queue with limited concurrency"""
+    global current_download_process
+    while True:
+        try:
+            # Get the next file to download from the queue
+            download_task = await download_queue.get()
+            
+            # Track current download process
+            current_download_process = {
+                'filename': download_task.get('filename', 'unknown'),
+                'type': 'download',
+                'status': 'in_progress',
+                'timestamp': int(time.time())
+            }
+            
+            # Use the download semaphore to limit concurrent downloads
+            async with download_semaphore:
+                await execute_download_task(download_task)
+                download_queue.task_done()
+                
+                # Clear current process after completion
+                current_download_process = None
+                
+        except asyncio.CancelledError:
+            # Clear current process on cancellation
+            current_download_process = None
+            break
+        except Exception as e:
+            logger.error(f'Error in download queue processor: {e}')
+            # Clear current process on error
+            current_download_process = None
+        # Continue processing other items in the queue
+
+
+async def process_upload_queue():
+    """Process files from the upload queue with limited concurrency"""
+    global current_upload_process
+    while True:
+        try:
+            # Get the next file to upload from the queue
+            upload_task = await upload_queue.get()
+            
+            # Track current upload process
+            current_upload_process = {
+                'filename': upload_task.get('filename', 'unknown'),
+                'type': 'upload',
+                'status': 'in_progress',
+                'timestamp': int(time.time())
+            }
+            
+            # Use the upload semaphore to limit concurrent uploads
+            async with upload_semaphore:
+                await execute_upload_task(upload_task)
+                upload_queue.task_done()
+                
+                # Clear current process after completion
+                current_upload_process = None
+                
+        except asyncio.CancelledError:
+            # Clear current process on cancellation
+            current_upload_process = None
+            break
+        except Exception as e:
+            logger.error(f'Error in upload queue processor: {e}')
+            # Clear current process on error
+            current_upload_process = None
+        # Continue processing other items in the queue
+
+
 @client.on(events.NewMessage(incoming=True))
 async def watcher(event):
     global pending_password
@@ -2352,17 +2616,24 @@ async def watcher(event):
                     await event.reply(final_txt)
                 logger.info(f'Direct media download complete: {temp_media_path} ({human_size(downloaded_bytes)}) elapsed {total_elapsed:.1f}s')
                 
-                # Add to processing queue
-                logger.info(f'Adding {filename} to processing queue as direct media')
-                await processing_queue.put(download_status)
+                # Add to upload queue directly instead of using the old processing queue
+                # Create upload task for the downloaded media file
+                upload_task = {
+                    'event': event,
+                    'file_path': temp_media_path,
+                    'filename': filename,
+                    'file_hash': None,  # Will be computed in the upload task
+                    'size_bytes': downloaded_bytes,
+                    'file_type': 'direct_media'
+                }
                 
-                # Start the processing task if it's not already running
-                global processing_task
-                if processing_task is None or processing_task.done():
-                    logger.info(f'Starting new processing task for {filename}')
-                    processing_task = asyncio.create_task(process_queue())
-                else:
-                    logger.info(f'Processing task already running, {filename} added to queue')
+                await upload_queue.put(upload_task)
+                await event.reply(f'📋 Queue: Downloaded media {filename} added to upload queue. Queue position: {upload_queue.qsize()}.')
+                
+                # Start the upload queue processor if it's not already running
+                if 'upload_queue_task' not in globals() or upload_queue_task.done():
+                    logger.info('Starting upload queue processor')
+                    upload_queue_task = asyncio.create_task(process_upload_queue())
                     
             except Exception as e:
                 logger.error(f'Error downloading direct media {filename}: {e}')
@@ -2421,6 +2692,17 @@ async def main_async():
     
     # Start the retry task
     asyncio.create_task(schedule_retry_task())
+    
+    # Initialize and start queue processors
+    global download_queue_task, upload_queue_task
+    download_queue_task = asyncio.create_task(process_download_queue())
+    upload_queue_task = asyncio.create_task(process_upload_queue())
+    
+    # Start the queue saving task
+    asyncio.create_task(save_queues())
+    
+    # Start the current processes saving task
+    asyncio.create_task(save_current_processes())
     
     me = await client.get_me()
     logger.info(f'Logged in as: {me.id} / {me.username or me.first_name}')

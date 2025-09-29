@@ -24,6 +24,10 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Configurable Limits**: Adjustable settings for maximum file size, disk space requirements, and concurrent processing.
 - **Queue Monitoring**: Built-in status command to check current processing state.
 - **Concurrent Downloads**: Supports multiple simultaneous downloads with sequential extraction/upload processing.
+- **Network Monitoring**: WiFi-only mode with intelligent network detection for mobile data conservation.
+- **Battery Monitoring**: Built-in battery status monitoring for Termux users.
+- **Compression Timeout Control**: Configurable timeout settings for video compression operations.
+- **System Resource Monitoring**: Real-time CPU, memory, and disk usage tracking.
 
 ## Prerequisites
 
@@ -220,6 +224,100 @@ DOWNLOAD_CHUNK_SIZE_KB=1024             # Chunk size for Premium users (default:
 
 The script will automatically detect and use FastTelethon when available, with seamless fallback to standard downloads if needed.
 
+### Network Monitoring and WiFi-Only Mode
+
+The script includes intelligent network monitoring specifically optimized for mobile environments like Android Termux:
+
+#### Network Detection Features
+- **Multi-method Detection**: Uses `ip route`, network interfaces, and Android-specific commands
+- **Connection Types**: Automatically detects WiFi, Mobile Data, Ethernet, or No Connection
+- **Real-time Monitoring**: Continuously monitors network changes during downloads
+- **Termux Compatibility**: Native support for Android Termux environment
+
+#### WiFi-Only Mode
+Enable in `secrets.properties` with `WIFI_ONLY_MODE=true`:
+
+```ini
+# Network preferences - WiFi-only mode for stable downloads in Android Termux
+WIFI_ONLY_MODE=true
+```
+
+**Behavior:**
+- **Automatic Pause**: Downloads pause when mobile data is detected
+- **Smart Resume**: Automatically resumes when WiFi becomes available
+- **User Notifications**: Real-time status updates about network changes
+- **Data Conservation**: Prevents accidental mobile data usage
+
+**Status Messages:**
+- `⏸️ Download paused: Mobile data detected`
+- `⏳ Waiting for WiFi connection...`
+- `▶️ Download resumed: WiFi connection established`
+
+### Video Compression Timeout Control
+
+The script provides flexible timeout control for video compression operations:
+
+#### Configuration Options
+Set timeout in `secrets.properties`:
+```ini
+# Video compression timeout in seconds (default 300 = 5 minutes)
+COMPRESSION_TIMEOUT_SECONDS=600  # 10 minutes
+```
+
+#### Dynamic Timeout Control
+Use the `/compression-timeout` command to adjust timeout during runtime:
+
+```
+/compression-timeout 300      # 300 seconds (5 minutes)
+/compression-timeout 5m       # 5 minutes
+/compression-timeout 2h       # 2 hours
+/compression-timeout 1h30m    # 1 hour 30 minutes
+/compression-timeout 600s     # 600 seconds
+```
+
+**Supported Formats:**
+- Plain numbers: `300` (seconds)
+- Minutes: `5m`, `120m`
+- Hours: `2h`, `24h`
+- Compound: `1h30m`, `2h15m`
+- Seconds: `600s`, `1800s`
+
+This is particularly useful for large video files that may require extended processing time.
+
+### System Monitoring and Status
+
+The script includes comprehensive system monitoring capabilities:
+
+#### System Status Command
+Use `/status` to get detailed information:
+
+**Bot Status:**
+- Uptime since script started
+- Log file size
+- Current processing state
+
+**System Usage:**
+- CPU usage percentage
+- Memory usage and availability
+- Disk space usage for the data directory
+
+**Configuration:**
+- Current settings for all major options
+- FastTelethon status
+- Network mode (WiFi-only or all connections)
+- Video transcoding status
+
+#### Battery Status (Termux Only)
+Use `/battery-status` for Android device monitoring:
+
+- Battery percentage
+- Charging status
+- Health status
+- Temperature
+- Current draw (in mA)
+
+This is particularly useful for monitoring device status during long-running operations on mobile devices.
+
 ### Handling Password-Protected Archives
 
 If the script encounters a password-protected archive, it will prompt you with instructions:
@@ -244,6 +342,25 @@ You can check the current processing status by sending `/queue` or `/q` to the s
 - Password-protected archives waiting for input
 - Processing queue (files that have completed download and are waiting for extraction/upload)
 
+### Available Commands
+
+The script supports a comprehensive set of commands for configuration and monitoring:
+
+- **`/help`** - Show all available commands
+- **`/status`** - Show comprehensive system and bot status
+- **`/battery-status`** - Show battery status (Termux only)
+- **`/q` or `/queue`** - Show current processing queue
+- **`/pass <password>`** - Provide password for protected archives
+- **`/cancel-password`** - Cancel password input
+- **`/cancel-extraction`** - Cancel current extraction
+- **`/cancel-process`** - Cancel entire process and cleanup
+- **`/max_concurrent <number>`** - Set max concurrent downloads
+- **`/set_max_archive_gb <number>`** - Set max archive size limit
+- **`/toggle_fast_download`** - Enable/disable FastTelethon acceleration
+- **`/toggle_wifi_only`** - Enable/disable WiFi-only mode
+- **`/toggle_transcoding`** - Enable/disable video transcoding
+- **`/compression-timeout <value>`** - Set compression timeout (e.g., 5m, 120m, 300s)
+
 ## Configuration Options
 
 The following options can be added to `secrets.properties` to customize behavior:
@@ -255,6 +372,8 @@ The following options can be added to `secrets.properties` to customize behavior
 - `FAST_DOWNLOAD_ENABLED` - Enable FastTelethon parallel downloads (default: true)
 - `FAST_DOWNLOAD_CONNECTIONS` - Parallel connections for FastTelethon (default: 8)
 - `TRANSCODE_ENABLED` - Enable/disable video compression feature (default: false)
+- `COMPRESSION_TIMEOUT_SECONDS` - Video compression timeout in seconds (default: 300)
+- `WIFI_ONLY_MODE` - Enable WiFi-only downloads for data conservation (default: false)
 - `PARALLEL_DOWNLOADS` - Number of parallel downloads for faster speed (default: 4)
 
 ## Code Architecture
@@ -274,7 +393,7 @@ The project has been refactored into a modular architecture for better maintaina
   - **`queue_manager.py`** - Download/upload queue management with concurrency control
   - **`command_handlers.py`** - User command processing and interaction handling
   - **`fast_download.py`** - FastTelethon parallel download implementation
-  - **`network_monitor.py`** - Network connectivity monitoring utilities
+  - **`network_monitor.py`** - Network connectivity monitoring and WiFi-only mode utilities
 
 ### Module Organization
 
@@ -286,6 +405,7 @@ Each module handles a specific aspect of functionality:
 - **Cache Management**: Processed file tracking, persistent queues, crash recovery
 - **Queue Management**: Concurrent download/upload control, task scheduling
 - **Command Handling**: User interaction, configuration updates, status reporting
+- **Network Monitoring**: Connection type detection, WiFi-only mode, network status callbacks
 
 This modular design makes the codebase easier to maintain, test, and extend with new features.
 
@@ -323,7 +443,8 @@ When adding new functionality:
 2. **Media Processing**: Add to `utils/media_processing.py` 
 3. **Telegram Features**: Add to `utils/telegram_operations.py`
 4. **User Commands**: Add to `utils/command_handlers.py`
-5. **Configuration**: Add to `utils/constants.py`
+5. **Network Features**: Add to `utils/network_monitor.py`
+6. **Configuration**: Add to `utils/constants.py`
 
 ### Import Structure
 

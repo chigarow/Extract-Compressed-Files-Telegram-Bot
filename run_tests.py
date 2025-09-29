@@ -172,7 +172,7 @@ def check_module_imports():
         "utils.media_processing",
         "utils.file_operations",
         "utils.constants",
-        "network_monitor"
+        "utils.network_monitor"
     ]
     
     import_results = {}

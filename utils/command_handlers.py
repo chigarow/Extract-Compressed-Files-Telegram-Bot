@@ -245,25 +245,30 @@ def _parse_timeout_value(raw: str) -> int:
     raw = raw.strip().lower()
     if raw.isdigit():
         return int(raw)
+    
     multipliers = {'s': 1, 'm': 60, 'h': 3600}
+    
+    # Handle simple formats like '5m', '2h', '30s'
     for suffix, mult in multipliers.items():
         if raw.endswith(suffix):
             num_part = raw[:-1]
-            if not num_part.isdigit():
-                raise ValueError('Invalid numeric value')
-            return int(num_part) * mult
-    # Also allow formats like '1h30m'
-    total = 0
+            if num_part.isdigit():
+                return int(num_part) * mult
+    
+    # Handle complex formats like '1h30m'
     import re
     pattern = re.compile(r'(\d+)([smh])')
     matches = list(pattern.finditer(raw))
     if matches:
+        # Check if the entire string is consumed by valid patterns
         consumed = ''.join(m.group(0) for m in matches)
         if consumed == raw:
+            total = 0
             for m in matches:
                 total += int(m.group(1)) * multipliers[m.group(2)]
             if total > 0:
                 return total
+    
     raise ValueError('Invalid timeout format')
 
 

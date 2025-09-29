@@ -63,8 +63,8 @@ from utils import (
     # Command handlers
     handle_password_command, handle_max_concurrent_command, handle_set_max_archive_gb_command,
     handle_toggle_fast_download_command, handle_toggle_wifi_only_command, 
-    handle_toggle_transcoding_command, handle_help_command, handle_battery_status_command,
-    handle_status_command, handle_queue_command, handle_cancel_password,
+    handle_toggle_transcoding_command, handle_compression_timeout_command, handle_help_command, 
+    handle_battery_status_command, handle_status_command, handle_queue_command, handle_cancel_password,
     handle_cancel_extraction, handle_cancel_process
 )
 
@@ -168,6 +168,9 @@ async def watcher(event):
                 await handle_toggle_wifi_only_command(event)
             elif command == '/toggle_transcoding':
                 await handle_toggle_transcoding_command(event)
+            elif command == '/compression-timeout' and len(parts) > 1:
+                value = ' '.join(parts[1:])
+                await handle_compression_timeout_command(event, value)
             else:
                 await event.reply(f'❌ Unknown command: {command}\n\nUse /help to see available commands.')
             return

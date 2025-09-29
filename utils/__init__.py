@@ -31,9 +31,9 @@ from .network_monitor import NetworkMonitor, NetworkType
 from .command_handlers import (
     handle_password_command, handle_max_concurrent_command, handle_set_max_archive_gb_command,
     handle_toggle_fast_download_command, handle_toggle_wifi_only_command, 
-    handle_toggle_transcoding_command, handle_help_command, handle_battery_status_command,
-    handle_status_command, handle_queue_command, handle_cancel_password,
-    handle_cancel_extraction, handle_cancel_process
+    handle_toggle_transcoding_command, handle_compression_timeout_command, handle_help_command, 
+    handle_battery_status_command, handle_status_command, handle_queue_command, 
+    handle_cancel_password, handle_cancel_extraction, handle_cancel_process
 )
 
 __all__ = [
@@ -47,7 +47,7 @@ __all__ = [
     'fast_download_to_file', 'fast_download_file', 'NetworkMonitor', 'NetworkType',
     'handle_password_command', 'handle_max_concurrent_command', 'handle_set_max_archive_gb_command',
     'handle_toggle_fast_download_command', 'handle_toggle_wifi_only_command', 
-    'handle_toggle_transcoding_command', 'handle_help_command', 'handle_battery_status_command',
-    'handle_status_command', 'handle_queue_command', 'handle_cancel_password',
-    'handle_cancel_extraction', 'handle_cancel_process'
+    'handle_toggle_transcoding_command', 'handle_compression_timeout_command', 'handle_help_command', 
+    'handle_battery_status_command', 'handle_status_command', 'handle_queue_command', 
+    'handle_cancel_password', 'handle_cancel_extraction', 'handle_cancel_process'
 ]

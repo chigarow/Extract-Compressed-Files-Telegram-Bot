@@ -8,8 +8,8 @@ import sys
 import os
 from unittest.mock import MagicMock, AsyncMock
 
-# Add the current directory to sys.path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add the parent directory to sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def test_compression_timeout_command():
     """Test the new /compression-timeout command"""

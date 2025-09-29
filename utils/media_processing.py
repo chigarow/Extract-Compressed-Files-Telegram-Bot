@@ -189,12 +189,33 @@ async def compress_video_for_telegram(input_path: str, output_path: str) -> bool
             return True
         else:
             logger.error(f"Video compression failed: {result.stderr}")
+            # Clean up failed output file
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                    logger.info(f"Cleaned up failed compression file: {output_path}")
+                except Exception as cleanup_e:
+                    logger.warning(f"Failed to clean up {output_path}: {cleanup_e}")
             return False
     except subprocess.TimeoutExpired:
         logger.error("Video compression timed out")
+        # Clean up incomplete compressed file after timeout
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+                logger.info(f"Cleaned up timed-out compression file: {output_path}")
+            except Exception as cleanup_e:
+                logger.warning(f"Failed to clean up timed-out file {output_path}: {cleanup_e}")
         return False
     except Exception as e:
         logger.error(f"Error during video compression: {e}")
+        # Clean up any partial output file
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+                logger.info(f"Cleaned up partial compression file: {output_path}")
+            except Exception as cleanup_e:
+                logger.warning(f"Failed to clean up partial file {output_path}: {cleanup_e}")
         return False
 
 

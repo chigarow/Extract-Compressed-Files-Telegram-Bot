@@ -109,7 +109,7 @@ async def save_current_processes():
     while True:
         try:
             await asyncio.sleep(60)  # Save every minute
-            await process_manager.save_current_processes()
+            process_manager.save_current_processes()
         except asyncio.CancelledError:
             break
         except Exception as e:

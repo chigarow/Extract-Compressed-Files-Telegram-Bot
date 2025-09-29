@@ -57,33 +57,33 @@ if [ "$FORCE_RESTART" = false ]; then
     # First, check if the script is even running
     if pgrep -f "$SCRIPT_NAME" > /dev/null; then
         echo -e "${YELLOW} - Process is running. Waiting for all operations to complete...${NC}"
-        
+
         # Wait for all ongoing operations to finish
         while true; do
             # Check for any active operations (download, upload, conversion, extraction)
             # This includes archive files, extracted directories, compressed videos, and temporary files
             ACTIVE_TASKS_FOUND=false
-            
+
             # Check for archive files being processed
             if find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( -type d -name 'extracted_*' -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.bz2' -o -iname '*.xz' -o -iname '*.ts' \) -print -quit | grep -q .; then
                 ACTIVE_TASKS_FOUND=true
             fi
-            
+
             # Check for video compression temp files
             if find "$DATA_DIR" -maxdepth 1 -mindepth 1 -iname '*_compressed.mp4' -print -quit | grep -q .; then
                 ACTIVE_TASKS_FOUND=true
             fi
-            
+
             # Check for video thumbnails
             if find "$DATA_DIR" -maxdepth 1 -mindepth 1 -iname '*.thumb.jpg' -print -quit | grep -q .; then
                 ACTIVE_TASKS_FOUND=true
             fi
-            
+
             # Check for any .part files (partial downloads)
             if find "$DATA_DIR" -maxdepth 1 -mindepth 1 -name '*.part' -print -quit | grep -q .; then
                 ACTIVE_TASKS_FOUND=true
             fi
-            
+
             if [ "$ACTIVE_TASKS_FOUND" = true ]; then
                 echo -e "${YELLOW} - Active operations detected (downloads, uploads, conversions, extractions). Waiting for 30 seconds...${NC}"
                 sleep 30
@@ -103,15 +103,6 @@ if [ "$FORCE_RESTART" = false ]; then
             echo -e "${GREEN} - Cleanup complete.${NC}"
         else
             echo -e "${GREEN} - No leftover files found.${NC}"
-        fi
-        
-        # Check for current process file and handle it appropriately
-        CURRENT_PROCESS_FILE="$DATA_DIR/current_process.json"
-        if [ -f "$CURRENT_PROCESS_FILE" ]; then
-            echo -e "${YELLOW} - Found current process file. This may indicate an ongoing operation.${NC}"
-            # Optionally, you can choose to remove it or preserve it
-            # For now, we'll preserve it to allow for crash recovery
-            echo -e "${GREEN} - Preserving current process file for crash recovery.${NC}"
         fi
     fi
 else

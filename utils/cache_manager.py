@@ -7,12 +7,83 @@ import os
 import json
 import asyncio
 import logging
+import datetime
 from .constants import (
     PROCESSED_CACHE_PATH, DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE,
     CURRENT_PROCESS_FILE, FAILED_OPERATIONS_FILE
 )
 
 logger = logging.getLogger('extractor')
+
+
+def make_serializable(obj):
+    \"\"\"Convert Telethon objects and other non-serializable objects to serializable format.\"\"\"
+    # Handle None values first
+    if obj is None:
+        return None
+    
+    # Handle Mock objects from unit tests or other non-serializable objects
+    if str(type(obj)).find('Mock') != -1 or hasattr(obj, '_mock_name'):
+        return serialize_telethon_object(obj)
+    
+    if hasattr(obj, 'to_dict'):
+        # Handle Telethon objects with to_dict method
+        try:
+            return obj.to_dict()
+        except Exception:
+            # If to_dict fails, extract basic attributes
+            return serialize_telethon_object(obj)
+    elif isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [make_serializable(item) for item in obj]
+    elif hasattr(obj, '__dict__'):
+        # Handle objects with __dict__ (most custom objects)
+        return serialize_telethon_object(obj)
+    else:
+        # For primitive types and strings
+        return obj
+
+
+def serialize_telethon_object(obj):
+    """Serialize Telethon objects by extracting essential fields only."""
+    # For Message objects, extract only necessary fields
+    if hasattr(obj, 'id') and hasattr(obj, 'message'):
+        return {
+            'id': getattr(obj, 'id', None),
+            'message': getattr(obj, 'message', None),
+            'date': getattr(obj, 'date', None).isoformat() if hasattr(obj, 'date') and obj.date else None,
+            'from_id': getattr(obj, 'from_id', None),
+            'to_id': getattr(obj, 'to_id', None),
+            'out': getattr(obj, 'out', None),
+            'file': serialize_file_object(getattr(obj, 'file', None)) if hasattr(obj, 'file') else None,
+            '_type': 'Message'
+        }
+    else:
+        # For other objects, try to extract basic attributes
+        try:
+            return {k: make_serializable(v) for k, v in obj.__dict__.items() if not k.startswith('_')}
+        except Exception:
+            return str(obj)
+
+
+def serialize_file_object(file_obj):
+    """Serialize Telethon File objects with essential fields only."""
+    if file_obj is None:
+        return None
+    
+    try:
+        return {
+            'id': getattr(file_obj, 'id', None),
+            'name': getattr(file_obj, 'name', None),
+            'size': getattr(file_obj, 'size', None),
+            'mime_type': getattr(file_obj, 'mime_type', None),
+            '_type': 'File'
+        }
+    except Exception:
+        return {'name': str(file_obj), '_type': 'File'}
 
 
 class CacheManager:
@@ -86,8 +157,10 @@ class PersistentQueue:
         """Save queue to disk."""
         try:
             tmp_path = self.queue_file + '.tmp'
+            # Make queue data serializable before saving
+            serializable_data = make_serializable(self.queue_data)
             with open(tmp_path, 'w') as f:
-                json.dump(self.queue_data, f, indent=2)
+                json.dump(serializable_data, f, indent=2)
             os.replace(tmp_path, self.queue_file)
         except Exception as e:
             logger.error(f"Failed to save queue to {self.queue_file}: {e}")
@@ -140,9 +213,11 @@ class ProcessManager:
                 'download_process': self.current_download_process,
                 'upload_process': self.current_upload_process
             }
+            # Make processes serializable before saving
+            serializable_data = make_serializable(data)
             tmp_path = CURRENT_PROCESS_FILE + '.tmp'
             with open(tmp_path, 'w') as f:
-                json.dump(data, f, indent=2)
+                json.dump(serializable_data, f, indent=2)
             os.replace(tmp_path, CURRENT_PROCESS_FILE)
         except Exception as e:
             logger.error(f"Failed to save current processes: {e}")
@@ -190,8 +265,10 @@ class FailedOperationsManager:
         """Save failed operations to disk."""
         try:
             tmp_path = FAILED_OPERATIONS_FILE + '.tmp'
+            # Make failed operations serializable before saving
+            serializable_operations = make_serializable(self.failed_operations)
             with open(tmp_path, 'w') as f:
-                json.dump(self.failed_operations, f, indent=2)
+                json.dump(serializable_operations, f, indent=2)
             os.replace(tmp_path, FAILED_OPERATIONS_FILE)
         except Exception as e:
             logger.error(f"Failed to save failed operations: {e}")

@@ -260,10 +260,12 @@ class QueueManager:
             file_ext = os.path.splitext(file_path)[1].lower()
             if file_ext in VIDEO_EXTENSIONS:
                 if needs_video_processing(file_path):
-                    # Compress video
-                    compressed_path = file_path.replace('.', '_compressed.')
+                    # Compress video - fix path generation to avoid corrupting directory structure
+                    base_path, ext = os.path.splitext(file_path)
                     if file_ext != '.mp4':
-                        compressed_path = os.path.splitext(file_path)[0] + '_compressed.mp4'
+                        compressed_path = base_path + '_compressed.mp4'
+                    else:
+                        compressed_path = base_path + '_compressed' + ext
                     
                     await event.reply(f"🎬 Processing video: {filename}...")
                     
@@ -390,6 +392,7 @@ class QueueManager:
     async def _add_to_retry_queue(self, task: dict):
         """Add a failed task to the retry queue."""
         from .constants import RETRY_QUEUE_FILE
+        from .cache_manager import make_serializable
         import json
         
         # Load existing retry queue
@@ -401,8 +404,9 @@ class QueueManager:
             except Exception as e:
                 logger.error(f"Failed to load retry queue: {e}")
         
-        # Add new task
-        retry_queue.append(task)
+        # Add new task (make it serializable)
+        serializable_task = make_serializable(task)
+        retry_queue.append(serializable_task)
         
         # Save updated retry queue
         try:
@@ -462,7 +466,10 @@ class QueueManager:
         # Update retry queue file
         try:
             with open(RETRY_QUEUE_FILE, 'w') as f:
-                json.dump(remaining_tasks, f, indent=2)
+                # Make sure remaining tasks are serializable
+                from .cache_manager import make_serializable
+                serializable_tasks = make_serializable(remaining_tasks)
+                json.dump(serializable_tasks, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to update retry queue: {e}")
 

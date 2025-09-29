@@ -205,14 +205,14 @@ async def watcher(event):
                     await event.reply(f'⏩ Archive {filename} was already processed. Skipping.')
                     return
                 
-                await queue_manager.add_download_task(download_task)
+                was_first_item = await queue_manager.add_download_task(download_task)
                 
                 # Check queue position
                 queue_position = queue_manager.download_queue.qsize()
-                if queue_position > 0:
-                    await event.reply(f'📋 {filename} added to download queue (position: {queue_position})')
-                else:
+                if was_first_item:
                     await event.reply(f'⬇️ Starting download: {filename}')
+                else:
+                    await event.reply(f'📋 {filename} added to download queue (position: {queue_position})')
             # Check if it's direct media
             elif file_ext in MEDIA_EXTENSIONS:
                 # Add direct media to download queue instead of processing immediately
@@ -226,14 +226,14 @@ async def watcher(event):
                     'temp_path': temp_path
                 }
                 
-                await queue_manager.add_download_task(download_task)
+                was_first_item = await queue_manager.add_download_task(download_task)
                 
                 # Check queue position
                 queue_position = queue_manager.download_queue.qsize()
-                if queue_position > 0:
-                    await event.reply(f'📋 {filename} added to download queue (position: {queue_position})')
-                else:
+                if was_first_item:
                     await event.reply(f'⬇️ Starting download: {filename}')
+                else:
+                    await event.reply(f'📋 {filename} added to download queue (position: {queue_position})')
             else:
                 # Not a supported file type
                 await event.reply(f'ℹ️ File type not supported: {file_ext}')

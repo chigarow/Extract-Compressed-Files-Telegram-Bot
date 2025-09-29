@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import time
+import json
 from .constants import DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT
 from .cache_manager import PersistentQueue
 from .constants import DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE, RETRY_QUEUE_FILE
@@ -109,23 +110,42 @@ class QueueManager:
             self.upload_task = asyncio.create_task(self._process_upload_queue())
             self._pending_upload_items = 0
     
-    async def add_download_task(self, task: dict):
-        """Add a download task to the queue."""
-        await self.download_queue.put(task)
-        self.download_persistent.add_item(task)
-        
-        # Start processor if not running
-        if self.download_task is None or self.download_task.done():
+    async def ensure_processors_started(self):
+        """Ensure both download and upload processors are started."""
+        if (self.download_task is None or self.download_task.done()) and not self.download_queue.empty():
+            logger.info("Starting download processor")
             self.download_task = asyncio.create_task(self._process_download_queue())
+        
+        if (self.upload_task is None or self.upload_task.done()) and not self.upload_queue.empty():
+            logger.info("Starting upload processor")
+            self.upload_task = asyncio.create_task(self._process_upload_queue())
     
     async def add_upload_task(self, task: dict):
         """Add an upload task to the queue."""
+        filename = task.get('filename', 'unknown')
+        task_type = task.get('type', 'unknown')
+        
+        logger.info(f"Adding upload task: {filename} (type: {task_type})")
+        
+        # Check current queue state before adding
+        was_queue_empty = self.upload_queue.qsize() == 0
+        processor_was_running = self.upload_task is not None and not self.upload_task.done()
+        
+        logger.info(f"Upload queue state before adding {filename}: empty={was_queue_empty}, processor_running={processor_was_running}")
+        
         await self.upload_queue.put(task)
         self.upload_persistent.add_item(task)
         
+        logger.info(f"Upload task {filename} added to queue. New queue size: {self.upload_queue.qsize()}")
+        
         # Start processor if not running
         if self.upload_task is None or self.upload_task.done():
+            logger.info(f"Starting upload processor for {filename} (processor was not running)")
             self.upload_task = asyncio.create_task(self._process_upload_queue())
+        else:
+            logger.info(f"Upload processor already running for {filename}")
+        
+        return was_queue_empty  # Return if this was the first item
     
     async def _process_download_queue(self):
         """Process download queue with concurrency control."""
@@ -133,23 +153,35 @@ class QueueManager:
         
         while True:
             try:
+                logger.info(f"Download processor waiting for tasks. Current queue size: {self.download_queue.qsize()}")
+                
                 # Get next download task
                 task = await self.download_queue.get()
                 
+                filename = task.get('filename', 'unknown')
+                logger.info(f"Download processor got task: {filename}")
+                
                 # Remove from persistent storage
                 self.download_persistent.remove_item(task)
+                logger.info(f"Removed {filename} from persistent storage")
                 
                 # Process with semaphore
+                logger.info(f"Acquiring download semaphore for {filename}")
                 async with self.download_semaphore:
+                    logger.info(f"Executing download task for {filename}")
                     await self._execute_download_task(task)
+                    logger.info(f"Completed download task for {filename}")
                 
                 self.download_queue.task_done()
+                logger.info(f"Marked download task done for {filename}. Remaining queue size: {self.download_queue.qsize()}")
                 
             except asyncio.CancelledError:
                 logger.info("Download queue processor cancelled")
                 break
             except Exception as e:
                 logger.error(f"Error in download queue processor: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 continue
     
     async def _process_upload_queue(self):
@@ -256,8 +288,16 @@ class QueueManager:
                     # Get the actual message object
                     try:
                         actual_message = await client.get_messages(peer, ids=message['id'])
-                        if actual_message and actual_message[0]:
-                            message = actual_message[0]
+                        if actual_message:
+                            # actual_message is a list, get the first (and only) message
+                            if isinstance(actual_message, list) and len(actual_message) > 0:
+                                message = actual_message[0]
+                            else:
+                                message = actual_message
+                            
+                            if not message:
+                                logger.error(f"Could not fetch message for {filename}")
+                                return
                         else:
                             logger.error(f"Could not fetch message for {filename}")
                             return
@@ -282,11 +322,13 @@ class QueueManager:
                 except Exception as e:
                     logger.warning(f"Could not update status message for {filename}: {e}")
             
-            # Process the downloaded file based on task type
+            # Immediately start the next phase of processing asynchronously
+            # This allows the download queue to continue processing other files
             task_type = task.get('type', 'unknown')
             
             if task_type == 'archive_download':
-                # Add to processing queue for extraction
+                # Start processing extraction and upload in background
+                logger.info(f"Starting background processing for {filename}")
                 processing_task = {
                     'type': 'extract_and_upload',
                     'temp_archive_path': temp_path,
@@ -294,12 +336,12 @@ class QueueManager:
                     'event': event if not is_restored_task else None
                 }
                 
-                from . import queue_manager as qm
-                processing_queue = qm.get_processing_queue()
-                await processing_queue.add_processing_task(processing_task)
+                # Start processing asynchronously without blocking download queue
+                asyncio.create_task(self._process_extraction_and_upload(processing_task))
                 
             elif task_type == 'direct_media_download':
-                # Add directly to upload queue
+                # Start compression and upload in background
+                logger.info(f"Starting background compression and upload for {filename}")
                 upload_task = {
                     'type': 'direct_media',
                     'event': event if not is_restored_task else None,
@@ -308,7 +350,8 @@ class QueueManager:
                     'size_bytes': os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
                 }
                 
-                await self.add_upload_task(upload_task)
+                # Start compression and upload asynchronously
+                asyncio.create_task(self._process_direct_media_upload(upload_task))
             
         except Exception as e:
             retry_count += 1
@@ -615,9 +658,31 @@ class QueueManager:
         task = args[0] if args else kwargs.get('task')
         if not isinstance(task, dict):
             raise TypeError('add_download_task expects dict or legacy signature (document, output_path, ...)')
+        
+        filename = task.get('filename', 'unknown')
+        task_type = task.get('type', 'unknown')
+        
+        logger.info(f"Adding download task: {filename} (type: {task_type})")
+        
+        # Check current queue state before adding
+        was_queue_empty = self.download_queue.qsize() == 0
+        processor_was_running = self.download_task is not None and not self.download_task.done()
+        
+        logger.info(f"Queue state before adding {filename}: empty={was_queue_empty}, processor_running={processor_was_running}")
+        
         await self.download_queue.put(task)
         self.download_persistent.add_item(task)
-        return task.get('id')
+        
+        logger.info(f"Task {filename} added to queue. New queue size: {self.download_queue.qsize()}")
+        
+        # Start processor if not running
+        if self.download_task is None or self.download_task.done():
+            logger.info(f"Starting download processor for {filename} (processor was not running)")
+            self.download_task = asyncio.create_task(self._process_download_queue())
+        else:
+            logger.info(f"Download processor already running for {filename}")
+        
+        return was_queue_empty  # Return if this was the first item
 
     async def add_upload_task(self, *args, **kwargs):  # type: ignore[override]
         if args and not isinstance(args[0], dict):
@@ -625,9 +690,31 @@ class QueueManager:
         task = args[0] if args else kwargs.get('task')
         if not isinstance(task, dict):
             raise TypeError('add_upload_task expects dict or legacy signature (file_path, chat_id, ...)')
+        
+        filename = task.get('filename', 'unknown')
+        task_type = task.get('type', 'unknown')
+        
+        logger.info(f"Adding upload task: {filename} (type: {task_type})")
+        
+        # Check current queue state before adding
+        was_queue_empty = self.upload_queue.qsize() == 0
+        processor_was_running = self.upload_task is not None and not self.upload_task.done()
+        
+        logger.info(f"Upload queue state before adding {filename}: empty={was_queue_empty}, processor_running={processor_was_running}")
+        
         await self.upload_queue.put(task)
         self.upload_persistent.add_item(task)
-        return task.get('id')
+        
+        logger.info(f"Upload task {filename} added to queue. New queue size: {self.upload_queue.qsize()}")
+        
+        # Start processor if not running
+        if self.upload_task is None or self.upload_task.done():
+            logger.info(f"Starting upload processor for {filename} (processor was not running)")
+            self.upload_task = asyncio.create_task(self._process_upload_queue())
+        else:
+            logger.info(f"Upload processor already running for {filename}")
+        
+        return was_queue_empty  # Return if this was the first item
 
     async def clear_completed_tasks(self):
         # Remove completed tasks from download queue
@@ -743,6 +830,87 @@ class QueueManager:
                 json.dump(serializable_tasks, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to update retry queue: {e}")
+
+    async def _process_extraction_and_upload(self, processing_task):
+        """Process archive extraction and upload asynchronously without blocking download queue"""
+        filename = processing_task.get('filename', 'unknown')
+        temp_archive_path = processing_task.get('temp_archive_path')
+        event = processing_task.get('event')
+        
+        logger.info(f"Starting extraction and upload processing for {filename}")
+        
+        try:
+            # Extract the archive
+            from .file_operations import extract_archive
+            extracted_files = await extract_archive(temp_archive_path)
+            
+            if not extracted_files:
+                logger.error(f"No files extracted from {filename}")
+                return
+            
+            logger.info(f"Extracted {len(extracted_files)} files from {filename}")
+            
+            # Add extracted files to upload queue
+            for extracted_file in extracted_files:
+                upload_task = {
+                    'type': 'extracted_file',
+                    'event': event,
+                    'file_path': extracted_file,
+                    'filename': os.path.basename(extracted_file),
+                    'size_bytes': os.path.getsize(extracted_file) if os.path.exists(extracted_file) else 0,
+                    'source_archive': filename
+                }
+                
+                await self.add_upload_task(upload_task)
+            
+            # Clean up the original archive
+            try:
+                if os.path.exists(temp_archive_path):
+                    os.remove(temp_archive_path)
+                    logger.info(f"Cleaned up archive: {temp_archive_path}")
+            except Exception as cleanup_e:
+                logger.warning(f"Could not clean up archive {temp_archive_path}: {cleanup_e}")
+                
+        except Exception as e:
+            logger.error(f"Error processing extraction for {filename}: {e}")
+
+    async def _process_direct_media_upload(self, upload_task):
+        """Process direct media compression and upload asynchronously"""
+        filename = upload_task.get('filename', 'unknown')
+        file_path = upload_task.get('file_path')
+        event = upload_task.get('event')
+        
+        logger.info(f"Starting compression and upload processing for {filename}")
+        
+        try:
+            # Check if file needs compression
+            if filename.lower().endswith('.mp4'):
+                from .media_processing import compress_video_for_telegram
+                
+                logger.info(f"Compressing video: {filename}")
+                compressed_path = await compress_video_for_telegram(file_path)
+                
+                if compressed_path and os.path.exists(compressed_path):
+                    # Update task with compressed file
+                    upload_task['file_path'] = compressed_path
+                    upload_task['size_bytes'] = os.path.getsize(compressed_path)
+                    upload_task['filename'] = os.path.basename(compressed_path)
+                    
+                    # Clean up original file
+                    try:
+                        if os.path.exists(file_path) and file_path != compressed_path:
+                            os.remove(file_path)
+                            logger.info(f"Cleaned up original file: {file_path}")
+                    except Exception as cleanup_e:
+                        logger.warning(f"Could not clean up original file {file_path}: {cleanup_e}")
+                else:
+                    logger.warning(f"Compression failed for {filename}, using original file")
+            
+            # Add to upload queue
+            await self.add_upload_task(upload_task)
+            
+        except Exception as e:
+            logger.error(f"Error processing direct media for {filename}: {e}")
 
 
 class ProcessingQueue:

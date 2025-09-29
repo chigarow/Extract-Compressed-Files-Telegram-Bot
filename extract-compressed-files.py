@@ -7,6 +7,11 @@ Workflow:
 3. The script listens for new messages containing a document whose filename extension matches supported archive formats.
 4. It downloads the file (Telethon has higher limits than Bot API), extracts media, and sends media files to target account B (configured in secrets).
 
+New Features:
+1. Direct media upload: Send images/videos directly to the user account and they will be re-uploaded to the target user as media.
+2. Proper video attributes: Videos now have correct duration and thumbnail for proper display in Telegram.
+3. Media tab support: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
+
 Notes:
 * Credentials loaded from secrets.properties: APP_API_ID, APP_API_HASH, ACCOUNT_B_USERNAME
 * Session is persisted in data/session.session (Telethon default if session name is path) to avoid re-login.
@@ -623,6 +628,223 @@ async def process_archive_event(event):
         ongoing_operations['download'] = None
         return
 
+async def get_video_attributes_and_thumbnail(input_path: str) -> tuple:
+    """
+    Get video attributes (duration, dimensions) and generate a thumbnail for Telegram.
+    Uses ffprobe to extract metadata and ffmpeg to create a thumbnail.
+    Returns a tuple of (duration, width, height, thumbnail_path) or (0, 0, 0, None) if failed.
+    """
+    if not is_ffprobe_available():
+        logger.warning("ffprobe not found, using default video attributes")
+        return 0, 0, 0, None
+    
+    try:
+        # Extract video metadata using ffprobe
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
+            input_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            import json
+            info = json.loads(result.stdout)
+            
+            # Find video stream
+            video_stream = None
+            for stream in info.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    video_stream = stream
+                    break
+            
+            if video_stream:
+                # Get duration
+                duration_str = video_stream.get('duration', '0')
+                try:
+                    duration = int(float(duration_str))
+                except ValueError:
+                    duration = 0
+                
+                # Get dimensions
+                width = video_stream.get('width', 0)
+                height = video_stream.get('height', 0)
+                
+                # Generate thumbnail
+                thumbnail_path = None
+                if width > 0 and height > 0:
+                    thumbnail_path = input_path + '.thumb.jpg'
+                    thumbnail_cmd = [
+                        'ffmpeg',
+                        '-i', input_path,
+                        '-ss', '00:00:01',  # Get thumbnail from 1 second into the video
+                        '-vframes', '1',
+                        '-f', 'mjpeg',
+                        thumbnail_path,
+                        '-y'  # Overwrite existing file
+                    ]
+                    
+                    thumb_result = subprocess.run(thumbnail_cmd, capture_output=True, text=True, timeout=30)
+                    if thumb_result.returncode != 0:
+                        logger.warning(f"Thumbnail generation failed: {thumb_result.stderr}")
+                        thumbnail_path = None
+                
+                return duration, width, height, thumbnail_path
+            else:
+                logger.warning(f"No video stream found in {input_path}")
+                return 0, 0, 0, None
+        else:
+            logger.error(f"Video metadata extraction failed for {input_path}: {result.stderr}")
+            return 0, 0, 0, None
+    except Exception as e:
+        logger.error(f"Error extracting video attributes for {input_path}: {e}")
+        return 0, 0, 0, None
+
+
+async def process_direct_media_upload(event, file_path: str, filename: str):
+    """Process direct media upload (images or videos) to target user"""
+    try:
+        await event.reply(f'📤 Uploading media file: {filename}')
+        target = await ensure_target_entity()
+        
+        # Create progress callback for upload
+        upload_status_msg = await event.reply('Starting upload...')
+        
+        def create_progress_callback(file_type):
+            start_time = time.time()
+            last_edit_pct = [-5]  # Use a list to be mutable in inner scope
+            last_edit_time = [0]
+
+            async def upload_progress(current, total):
+                pct = int(current * 100 / total) if total > 0 else 0
+                now = time.time()
+
+                elapsed = now - start_time
+                speed = current / elapsed if elapsed > 0 else 0
+                eta = (total - current) / speed if speed > 0 else float('inf')
+
+                if (pct >= last_edit_pct[0] + 5) or ((now - last_edit_time[0]) > 5):
+                    txt = f'📤 Uploading {file_type}: {pct}% | {human_size(speed)}/s | ETA: {format_eta(eta)}'
+                    try:
+                        await upload_status_msg.edit(txt)
+                    except:
+                        pass
+                    last_edit_pct[0] = pct
+                    last_edit_time[0] = now
+            return upload_progress
+
+        # Determine if it's an image or video and upload accordingly
+        ext = os.path.splitext(filename)[1].lower()
+        
+        if ext in PHOTO_EXTENSIONS:
+            # Upload as photo (not document) to appear in Media tab
+            await client.send_file(target, file_path, caption=filename, force_document=False, 
+                                   progress_callback=create_progress_callback(filename))
+        elif ext in VIDEO_EXTENSIONS:
+            # Check if video needs transcoding
+            if TRANSCODE_ENABLED and needs_video_processing(file_path):
+                # Compress video to MP4 format for better Telegram streaming
+                compressed_path = os.path.splitext(file_path)[0] + '_compressed.mp4'
+                if await compress_video_for_telegram(file_path, compressed_path):
+                    # Get attributes for the compressed video
+                    duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(compressed_path)
+                    
+                    # Import needed for video attributes
+                    from telethon.tl.types import DocumentAttributeVideo
+                    
+                    # Upload with proper video attributes
+                    await client.send_file(
+                        target, 
+                        compressed_path, 
+                        caption=filename,
+                        force_document=False,
+                        supports_streaming=True,
+                        progress_callback=create_progress_callback(filename),
+                        attributes=[
+                            DocumentAttributeVideo(
+                                duration=duration,
+                                w=width,
+                                h=height,
+                                supports_streaming=True
+                            )
+                        ],
+                        thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                    )
+                    
+                    # Clean up compressed file and thumbnail
+                    try:
+                        os.remove(compressed_path)
+                        if thumbnail_path and os.path.exists(thumbnail_path):
+                            os.remove(thumbnail_path)
+                    except:
+                        pass
+                else:
+                    # If compression fails, upload original file
+                    duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
+                    
+                    from telethon.tl.types import DocumentAttributeVideo
+                    
+                    await client.send_file(
+                        target, 
+                        file_path, 
+                        caption=filename,
+                        force_document=False,
+                        supports_streaming=True,
+                        progress_callback=create_progress_callback(filename),
+                        attributes=[
+                            DocumentAttributeVideo(
+                                duration=duration,
+                                w=width,
+                                h=height,
+                                supports_streaming=True
+                            )
+                        ],
+                        thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                    )
+                    
+                    # Clean up thumbnail
+                    if thumbnail_path and os.path.exists(thumbnail_path):
+                        os.remove(thumbnail_path)
+            else:
+                # Upload video as-is when transcoding is disabled or not needed
+                duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(file_path)
+                
+                from telethon.tl.types import DocumentAttributeVideo
+                
+                await client.send_file(
+                    target, 
+                    file_path, 
+                    caption=filename,
+                    force_document=False,
+                    supports_streaming=True,
+                    progress_callback=create_progress_callback(filename),
+                    attributes=[
+                        DocumentAttributeVideo(
+                            duration=duration,
+                            w=width,
+                            h=height,
+                            supports_streaming=True
+                        )
+                    ],
+                    thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                )
+                
+                # Clean up thumbnail
+                if thumbnail_path and os.path.exists(thumbnail_path):
+                    os.remove(thumbnail_path)
+        
+        await upload_status_msg.edit(f'✅ Upload complete: {filename}')
+        await event.reply(f'✅ Media file {filename} successfully uploaded to {TARGET_USERNAME}')
+        
+    except Exception as e:
+        logger.error(f'Error uploading media file {filename}: {e}')
+        await event.reply(f'❌ Error uploading {filename}: {e}')
+
+
 async def process_queue():
     """Process files from the queue in FIFO order (based on download completion)"""
     global current_processing
@@ -639,7 +861,12 @@ async def process_queue():
             
             # Process the file (extraction, upload, etc.)
             logger.info(f'Starting extraction and upload for {filename}')
-            await process_extract_and_upload(download_status)
+            if 'direct_media' in download_status and download_status['direct_media']:
+                # This is a direct media upload (not from archive)
+                await process_direct_media_upload(download_status['event'], download_status['temp_archive_path'], filename)
+            else:
+                # Standard archive processing
+                await process_extract_and_upload(download_status)
             
             # Mark task as done
             processing_queue.task_done()
@@ -842,31 +1069,22 @@ async def process_extract_and_upload(download_status):
                     last_edit_time[0] = now
             return upload_progress
 
-        # Upload images first as a group
-        if image_files:
+        # Upload images individually to ensure they appear in Media tab
+        for path in image_files:
             try:
-                await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True, progress_callback=create_progress_callback("images"))
-                sent += len(image_files)
+                await client.send_file(target, path, caption=os.path.basename(path), force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
+                sent += 1
                 download_status['uploaded_files'] = sent
-                logger.info(f'Sent {len(image_files)} images as group')
+                logger.info(f'Sent image: {path}')
             except Exception as e:
-                logger.error(f'Failed to send image group: {e}')
-                # Fallback to individual uploads if group upload fails
-                for path in image_files:
-                    try:
-                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
-                        sent += 1
-                        download_status['uploaded_files'] = sent
-                    except Exception as e:
-                        logger.error(f'Failed to send {path}: {e}')
-                        await event.reply(f'Error sending {os.path.basename(path)}: {e}')
+                logger.error(f'Failed to send {path}: {e}')
+                await event.reply(f'Error sending {os.path.basename(path)}: {e}')
         
-        # Upload videos as a group
-        video_files_to_send = []
-        compressed_video_paths = []  # Keep track of compressed files for cleanup
-        
+        # Upload videos individually with proper attributes to ensure they appear in Media tab
         for path in video_files:
+            original_path = path
             ext = os.path.splitext(path)[1].lower()
+            
             try:
                 # Validate video file before processing
                 video_info = validate_video_file(path)
@@ -878,39 +1096,56 @@ async def process_extract_and_upload(download_status):
                     if await compress_video_for_telegram(path, compressed_path):
                         # Validate compressed video as well
                         compressed_info = validate_video_file(compressed_path)
-                        # If compression is successful, add the compressed file to the list
-                        video_files_to_send.append(compressed_path)
+                        # If compression is successful, use the compressed file
+                        path = compressed_path
                         compressed_video_paths.append(compressed_path)
                     else:
-                        # If compression fails, add the original file
-                        video_files_to_send.append(path)
+                        # If compression fails, use the original file
+                        path = original_path
                 else:
-                    # Add videos as-is when compression is disabled or not needed
-                    video_files_to_send.append(path)
-            except Exception as e:
-                logger.error(f'Error preparing video {path}: {e}')
-                # Add the original file if there's an error in preparation
-                video_files_to_send.append(path)
-        
-        # Send videos as a group
-        if video_files_to_send:
-            try:
-                await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True, progress_callback=create_progress_callback("videos"))
-                sent += len(video_files_to_send)
+                    # Use videos as-is when compression is disabled or not needed
+                    path = original_path
+                
+                # Get video attributes and thumbnail
+                duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(path)
+                
+                # Import needed for video attributes
+                from telethon.tl.types import DocumentAttributeVideo
+                
+                # Upload with proper video attributes
+                await client.send_file(
+                    target, 
+                    path, 
+                    caption=os.path.basename(original_path),
+                    force_document=False,
+                    supports_streaming=True,
+                    progress_callback=create_progress_callback(os.path.basename(original_path)),
+                    attributes=[
+                        DocumentAttributeVideo(
+                            duration=duration,
+                            w=width,
+                            h=height,
+                            supports_streaming=True
+                        )
+                    ],
+                    thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                )
+                
+                sent += 1
                 download_status['uploaded_files'] = sent
-                logger.info(f'Sent {len(video_files_to_send)} videos as group')
-            except Exception as e:
-                logger.error(f'Failed to send video group: {e}')
-                # Fallback to individual uploads if group upload fails
-                for i, path in enumerate(video_files_to_send):
-                    original_path = video_files[i]  # Get the original path for error messages
+                
+                # Clean up thumbnail after upload
+                if thumbnail_path and os.path.exists(thumbnail_path):
                     try:
-                        await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
-                        sent += 1
-                        download_status['uploaded_files'] = sent
-                    except Exception as e:
-                        logger.error(f'Failed to send {original_path}: {e}')
-                        await event.reply(f'Error sending {os.path.basename(original_path)}: {e}')
+                        os.remove(thumbnail_path)
+                    except:
+                        pass
+                        
+            except Exception as e:
+                logger.error(f'Failed to send video {original_path}: {e}')
+                await event.reply(f'Error sending video {os.path.basename(original_path)}: {e}')
+        
+        logger.info(f'Sent {len(video_files)} videos individually with proper attributes')
         
         # Clean up compressed video files
         for compressed_path in compressed_video_paths:
@@ -1015,28 +1250,21 @@ async def handle_password_command(event, password: str):
                     last_edit_time[0] = now
             return upload_progress
 
-        # Upload images first as a group
-        if image_files:
+        # Upload images individually to ensure they appear in Media tab
+        for path in image_files:
             try:
-                await client.send_file(target, image_files, caption=f"Images from {archive_name}", force_document=False, album=True, progress_callback=create_progress_callback("images"))
-                sent += len(image_files)
-                logger.info(f'Sent {len(image_files)} images as group')
+                await client.send_file(target, path, caption=os.path.basename(path), force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
+                sent += 1
+                logger.info(f'Sent image: {path}')
             except Exception as e:
-                logger.error(f'Failed to send image group: {e}')
-                # Fallback to individual uploads if group upload fails
-                for path in image_files:
-                    try:
-                        await client.send_file(target, path, caption=os.path.basename(path), force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
-                        sent += 1
-                    except Exception as e:
-                        await event.reply(f'Error sending {os.path.basename(path)}: {e}')
+                logger.error(f'Failed to send {path}: {e}')
+                await event.reply(f'Error sending {os.path.basename(path)}: {e}')
         
-        # Upload videos as a group
-        video_files_to_send = []
-        compressed_video_paths = []  # Keep track of compressed files for cleanup
-        
+        # Upload videos individually with proper attributes to ensure they appear in Media tab
         for path in video_files:
+            original_path = path
             ext = os.path.splitext(path)[1].lower()
+            
             try:
                 # Validate video file before processing
                 video_info = validate_video_file(path)
@@ -1048,36 +1276,55 @@ async def handle_password_command(event, password: str):
                     if await compress_video_for_telegram(path, compressed_path):
                         # Validate compressed video as well
                         compressed_info = validate_video_file(compressed_path)
-                        # If compression is successful, add the compressed file to the list
-                        video_files_to_send.append(compressed_path)
+                        # If compression is successful, use the compressed file
+                        path = compressed_path
                         compressed_video_paths.append(compressed_path)
                     else:
-                        # If compression fails, add the original file
-                        video_files_to_send.append(path)
+                        # If compression fails, use the original file
+                        path = original_path
                 else:
-                    # Add videos as-is when compression is disabled or not needed
-                    video_files_to_send.append(path)
-            except Exception as e:
-                logger.error(f'Error preparing video {path}: {e}')
-                # Add the original file if there's an error in preparation
-                video_files_to_send.append(path)
-        
-        # Send videos as a group
-        if video_files_to_send:
-            try:
-                await client.send_file(target, video_files_to_send, caption=f"Videos from {archive_name}", supports_streaming=True, force_document=False, album=True, progress_callback=create_progress_callback("videos"))
-                sent += len(video_files_to_send)
-                logger.info(f'Sent {len(video_files_to_send)} videos as group')
-            except Exception as e:
-                logger.error(f'Failed to send video group: {e}')
-                # Fallback to individual uploads if group upload fails
-                for i, path in enumerate(video_files_to_send):
-                    original_path = video_files[i]  # Get the original path for error messages
+                    # Use videos as-is when compression is disabled or not needed
+                    path = original_path
+                
+                # Get video attributes and thumbnail
+                duration, width, height, thumbnail_path = await get_video_attributes_and_thumbnail(path)
+                
+                # Import needed for video attributes
+                from telethon.tl.types import DocumentAttributeVideo
+                
+                # Upload with proper video attributes
+                await client.send_file(
+                    target, 
+                    path, 
+                    caption=os.path.basename(original_path),
+                    force_document=False,
+                    supports_streaming=True,
+                    progress_callback=create_progress_callback(os.path.basename(original_path)),
+                    attributes=[
+                        DocumentAttributeVideo(
+                            duration=duration,
+                            w=width,
+                            h=height,
+                            supports_streaming=True
+                        )
+                    ],
+                    thumb=thumbnail_path  # Include thumbnail to fix black thumbnail issue
+                )
+                
+                sent += 1
+                
+                # Clean up thumbnail after upload
+                if thumbnail_path and os.path.exists(thumbnail_path):
                     try:
-                        await client.send_file(target, path, caption=os.path.basename(original_path), supports_streaming=True, force_document=False, progress_callback=create_progress_callback(os.path.basename(path)))
-                        sent += 1
-                    except Exception as e:
-                        await event.reply(f'Error sending {os.path.basename(original_path)}: {e}')
+                        os.remove(thumbnail_path)
+                    except:
+                        pass
+                        
+            except Exception as e:
+                logger.error(f'Failed to send video {original_path}: {e}')
+                await event.reply(f'Error sending video {os.path.basename(original_path)}: {e}')
+        
+        logger.info(f'Sent {len(video_files)} videos individually with proper attributes')
         
         # Clean up compressed video files
         for compressed_path in compressed_video_paths:
@@ -1573,10 +1820,137 @@ async def watcher(event):
             await handle_help_command(event)
             return
 
-    # If a document & archive extension & not waiting for password (or waiting but new one arrives -> process anyway after) 
+    # Handle media files (images/videos) directly
     if event.message and event.message.document:
         filename = event.message.file.name or 'file'
-        if filename.lower().endswith(ARCHIVE_EXTENSIONS):
+        if filename.lower().endswith(MEDIA_EXTENSIONS):
+            # This is a direct media upload (not an archive)
+            size_bytes = event.message.file.size or 0
+            logger.info(f'Received direct media: {filename} size={human_size(size_bytes)}')
+            
+            # Check if we're already processing or have pending password
+            if current_processing or pending_password:
+                await event.reply(f'⚠️ Currently processing another file. Media {filename} will be queued.')
+            
+            # Create a temporary path for the media file
+            temp_media_path = os.path.join(DATA_DIR, filename)
+            
+            # Update current processing status for download phase
+            download_status = {
+                'filename': filename,
+                'status': 'downloading',
+                'start_time': time.time(),
+                'size': size_bytes,
+                'progress': 0,
+                'event': event,
+                'temp_archive_path': temp_media_path,
+                'message': event.message,
+                'direct_media': True  # Flag for direct media upload
+            }
+            
+            status_msg = await event.reply(f'⬇️ Downloading media {filename}...')
+
+            # Progress tracking for direct media download
+            start_download_ts = time.time()
+            chunk_size = DOWNLOAD_CHUNK_SIZE_KB * 1024  # Use the configured chunk size
+            
+            # Progress state & throttling
+            last_report = {'pct': -1, 'time': time.time(), 'last_edit_pct': -1, 'last_edit_time': time.time()}
+            MIN_PCT_STEP = 5
+            MIN_EDIT_INTERVAL = 7  # seconds
+            speed_window = []  # (timestamp, bytes)
+
+            def progress(downloaded: int, total: int):
+                if not total or downloaded < 0:
+                    return
+                pct = int(downloaded * 100 / total)
+                now = time.time()
+                # Update current processing progress
+                download_status['progress'] = pct
+                # Maintain small window for speed calc (last 5 samples / 20s).
+                speed_window.append((now, downloaded))
+                # prune
+                while len(speed_window) > 5 or (speed_window and now - speed_window[0][0] > 20):
+                    speed_window.pop(0)
+                elapsed = now - start_download_ts
+                avg_speed = downloaded / elapsed if elapsed > 0 else 0
+                # moving speed
+                if len(speed_window) >= 2:
+                    dt = speed_window[-1][0] - speed_window[0][0]
+                    db = speed_window[-1][1] - speed_window[0][1]
+                    inst_speed = db / dt if dt > 0 else avg_speed
+                else:
+                    inst_speed = avg_speed
+                remaining = total - downloaded
+                eta = remaining / inst_speed if inst_speed > 0 else float('inf')
+                speed_h = human_size(inst_speed) + '/s'
+                should_log = pct >= last_report['pct'] + 5 or (now - last_report['time']) >= 10
+                if should_log:
+                    logger.info(f'Download progress {filename}: {pct}% ({human_size(downloaded)}/{human_size(total)}) ETA {format_eta(eta)} ({speed_h})')
+                    last_report['pct'] = pct
+                    last_report['time'] = now
+                should_edit = (pct >= last_report['last_edit_pct'] + MIN_PCT_STEP) or ((now - last_report['last_edit_time']) >= MIN_EDIT_INTERVAL)
+                if should_edit:
+                    txt = (f'⬇️ Download {pct}% | ETA {format_eta(eta)} | {speed_h} | '
+                           f'{human_size(downloaded)} / {human_size(total)}')
+                    # Schedule async edit (can't await here)
+                    async def do_edit():
+                        try:
+                            await status_msg.edit(txt)
+                        except Exception:
+                            pass
+                    client.loop.create_task(do_edit())
+                    last_report['last_edit_pct'] = pct
+                    last_report['last_edit_time'] = now
+            
+            try:
+                # Download the media file
+                downloaded_bytes = 0
+                with open(temp_media_path, 'wb') as f:
+                    async for chunk in client.iter_download(event.message.document, chunk_size=chunk_size):
+                        f.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        progress(downloaded_bytes, size_bytes)
+                
+                total_elapsed = time.time() - start_download_ts
+                avg_speed = downloaded_bytes / total_elapsed if total_elapsed > 0 else 0
+                speed_h = human_size(avg_speed) + '/s'
+                final_txt = (f'✅ Download complete: {human_size(downloaded_bytes)} in {format_eta(total_elapsed)} '
+                             f'(~{speed_h}). Queued for upload...')
+                try:
+                    await status_msg.edit(final_txt)
+                except Exception:
+                    await event.reply(final_txt)
+                logger.info(f'Direct media download complete: {temp_media_path} ({human_size(downloaded_bytes)}) elapsed {total_elapsed:.1f}s')
+                
+                # Add to processing queue
+                logger.info(f'Adding {filename} to processing queue as direct media')
+                await processing_queue.put(download_status)
+                
+                # Start the processing task if it's not already running
+                global processing_task
+                if processing_task is None or processing_task.done():
+                    logger.info(f'Starting new processing task for {filename}')
+                    processing_task = asyncio.create_task(process_queue())
+                else:
+                    logger.info(f'Processing task already running, {filename} added to queue')
+                    
+            except Exception as e:
+                logger.error(f'Error downloading direct media {filename}: {e}')
+                try:
+                    await status_msg.edit(f'❌ Download failed: {e}')
+                except Exception:
+                    await event.reply(f'❌ Failed to download media: {e}')
+                # Clean up partially downloaded file
+                if os.path.exists(temp_media_path):
+                    try:
+                        os.remove(temp_media_path)
+                    except OSError:
+                        pass
+                return
+        
+        # Handle archive files (existing functionality)
+        elif filename.lower().endswith(ARCHIVE_EXTENSIONS):
             if pending_password:
                 await event.reply('⚠️ Another archive is awaiting password; process this one after finishing/cancelling.')
                 return

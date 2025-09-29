@@ -6,11 +6,14 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 
 - **User Account Based Access**: Uses a user account (not a bot token) for authentication, controlled by specifying a target username in the configuration.
 - **Automatic Extraction**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz.
+- **Direct Media Upload**: Send images/videos directly to the user account and they will be re-uploaded to the target user as media in the Media tab.
 - **Media Filtering**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm).
 - **Duplicate Detection**: Avoids reprocessing archives that have been previously processed by maintaining a cache of file hashes.
 - **Efficient Storage Management**: Deletes the original compressed file and the extracted files after uploading to save storage space.
 - **Password Protected Archive Support**: Handles password-protected archives with a simple command interface.
 - **Fast Video Compression**: Automatically compresses all video files to MP4 format optimized for Telegram streaming.
+- **Proper Video Attributes**: Videos now have correct duration and thumbnail for proper display in Telegram (fixes black thumbnails and 00:00 duration).
+- **Media Tab Support**: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
 - **Grouped Media Uploads**: Uploads images and videos as separate grouped albums with archive name as caption.
 - **FastTelethon Parallel Downloads**: Automatic 10-20x speed acceleration for large files using parallel MTProto connections.
 - **Optimized Download Speed**: Uses larger chunk sizes for Telegram Premium users to maximize download performance.
@@ -90,6 +93,29 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
     -   Forward the media files to the target user specified in the configuration.
     -   Delete the local files.
 
+### Direct Media Upload
+
+In addition to processing compressed archives, you can now send images and videos directly to the user account and they will be re-uploaded to the target user as media files in the Media tab:
+
+1.  **Send an image or video** directly to your user account.
+2.  The script will automatically:
+    -   Download the media file.
+    -   Upload it to the target user as a native media file (photo or video).
+    -   The file will appear in the target user's Media tab.
+    -   Delete the local file after upload.
+
+This feature is particularly useful when you want to optimize media files for Telegram or re-upload them to another account while ensuring they appear properly in the Media tab.
+
+### Video Quality and Thumbnail Fixes
+
+The script now ensures videos have proper thumbnails and durations displayed in Telegram by:
+
+- Extracting video attributes using `ffprobe`
+- Generating proper thumbnails with `ffmpeg`
+- Setting correct duration and dimensions when uploading
+- Using proper video attributes (`DocumentAttributeVideo`) during upload
+- This resolves the common issue of black thumbnails and 00:00 duration display
+
 ### Grouped Media Uploads
 
 The script now uploads media files as grouped albums for better organization:
@@ -164,6 +190,20 @@ The script provides several commands to cancel ongoing processes:
 - Reply with `/cancel-extraction` to cancel the current extraction process
 - Reply with `/cancel-process` to cancel the entire process and delete any downloaded files
 - Reply with `/max_concurrent <number>` to dynamically change the maximum number of concurrent downloads
+
+### Additional Commands
+
+The script supports additional commands for managing the bot:
+
+- Reply with `/help` to show all available commands
+- Reply with `/status` to show the current status of the bot
+- Reply with `/battery-status` to show battery information (Termux only)
+- Reply with `/q` or `/queue` to show the current processing queue
+- Reply with `/pass <password>` to provide a password for a protected archive
+- Reply with `/toggle_fast_download` to enable/disable fast download
+- Reply with `/toggle_wifi_only` to enable/disable WiFi-Only mode
+- Reply with `/toggle_transcoding` to enable/disable video transcoding
+- Reply with `/set_max_archive_gb <number>` to set the maximum archive size in GB
 
 ### Checking Processing Status
 

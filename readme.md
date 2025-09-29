@@ -85,6 +85,8 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 
     On first run, you'll be prompted to enter your phone number and the code sent by Telegram.
 
+    **Note**: The script now uses a modular architecture with components in the `utils/` directory. All dependencies and imports are handled automatically.
+
 ## Usage
 
 1.  **Send a compressed file** to your user account (the one running this script) from any chat.
@@ -255,19 +257,117 @@ The following options can be added to `secrets.properties` to customize behavior
 - `TRANSCODE_ENABLED` - Enable/disable video compression feature (default: false)
 - `PARALLEL_DOWNLOADS` - Number of parallel downloads for faster speed (default: 4)
 
+## Code Architecture
+
+The project has been refactored into a modular architecture for better maintainability:
+
+### Main Components
+
+- **`extract-compressed-files.py`** - Main entry point and event handling
+- **`utils/`** - Modular utility components:
+  - **`constants.py`** - Configuration constants and file paths
+  - **`utils.py`** - General utility functions (human_size, format_eta, logging setup)
+  - **`file_operations.py`** - File handling, extraction, and hashing operations
+  - **`media_processing.py`** - Video processing and media format validation
+  - **`telegram_operations.py`** - Telegram client operations and file transfers
+  - **`cache_manager.py`** - File processing cache and persistent data management
+  - **`queue_manager.py`** - Download/upload queue management with concurrency control
+  - **`command_handlers.py`** - User command processing and interaction handling
+  - **`fast_download.py`** - FastTelethon parallel download implementation
+  - **`network_monitor.py`** - Network connectivity monitoring utilities
+
+### Module Organization
+
+Each module handles a specific aspect of functionality:
+
+- **File Operations**: SHA256 hashing, archive extraction, password handling
+- **Media Processing**: Video format validation, ffmpeg operations, thumbnail generation
+- **Telegram Operations**: File uploads/downloads, progress tracking, message handling
+- **Cache Management**: Processed file tracking, persistent queues, crash recovery
+- **Queue Management**: Concurrent download/upload control, task scheduling
+- **Command Handling**: User interaction, configuration updates, status reporting
+
+This modular design makes the codebase easier to maintain, test, and extend with new features.
+
 ## How It Works
 
 1. The script uses Telethon to connect to Telegram as a user account
 2. It listens for incoming messages containing document attachments with recognized archive extensions
 3. When an archive is detected:
    - It checks if the file has been processed before using SHA256 hash verification
-   - Downloads the file with progress tracking
+   - Downloads the file with progress tracking using the queue management system
    - Verifies sufficient disk space is available
-   - Extracts the contents using patoolib or format-specific tools
-   - Scans for media files (images and videos)
-   - Sends each media file to the configured target user
-   - Updates the processed files cache
-   - Cleans up temporary files
+   - Extracts the contents using specialized extraction tools
+   - Scans for media files (images and videos) using media processing utilities
+   - Sends each media file to the configured target user via Telegram operations
+   - Updates the processed files cache using the cache manager
+   - Cleans up temporary files and manages queue state
+
+## Development Notes
+
+### Modular Architecture Benefits
+
+The refactored modular structure provides several advantages:
+
+1. **Separation of Concerns**: Each module handles a specific functionality area
+2. **Easier Testing**: Individual components can be tested independently
+3. **Better Maintainability**: Bug fixes and features can be isolated to specific modules
+4. **Code Reusability**: Modules can be imported and used by other components
+5. **Cleaner Dependencies**: Import relationships are clearly defined
+
+### Adding New Features
+
+When adding new functionality:
+
+1. **File Operations**: Add to `utils/file_operations.py`
+2. **Media Processing**: Add to `utils/media_processing.py` 
+3. **Telegram Features**: Add to `utils/telegram_operations.py`
+4. **User Commands**: Add to `utils/command_handlers.py`
+5. **Configuration**: Add to `utils/constants.py`
+
+### Import Structure
+
+The main script imports from `utils` which provides a clean API:
+
+```python
+from utils import (
+    # Constants
+    ARCHIVE_EXTENSIONS, MAX_ARCHIVE_GB, 
+    # Functions
+    human_size, compute_sha256, ensure_target_entity,
+    # Classes  
+    CacheManager, TelegramOperations
+)
+```
+
+### File Organization
+
+```
+ExtractCompressedFiles/
+├── extract-compressed-files.py      # Main application entry point
+├── extract-compressed-files-original.py  # Original monolithic version (backup)
+├── config.py                        # Configuration management
+├── requirements.txt                  # Python dependencies
+├── utils/                           # Modular utility components
+│   ├── __init__.py                  # Module exports and API
+│   ├── constants.py                 # Configuration and constants
+│   ├── utils.py                     # General utility functions
+│   ├── file_operations.py           # File handling operations
+│   ├── media_processing.py          # Video/media processing
+│   ├── telegram_operations.py       # Telegram client operations
+│   ├── cache_manager.py             # Cache and persistence
+│   ├── queue_manager.py             # Queue management
+│   ├── command_handlers.py          # User command processing
+│   ├── fast_download.py             # FastTelethon downloads
+│   └── network_monitor.py           # Network monitoring
+└── data/                            # Runtime data directory
+    ├── processed_archives.json      # Cache of processed files
+    ├── download_queue.json           # Persistent download queue
+    ├── upload_queue.json             # Persistent upload queue
+    ├── current_process.json          # Current processing state
+    ├── failed_operations.json        # Failed operations for retry
+    └── session.session               # Telegram session data
+```
 
 ## License
 

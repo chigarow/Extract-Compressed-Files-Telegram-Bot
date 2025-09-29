@@ -27,7 +27,7 @@ from telethon.errors import (
 
 # Import network monitoring if available
 try:
-    from network_monitor import NetworkMonitor, NetworkType
+    from .network_monitor import NetworkMonitor, NetworkType
     NETWORK_MONITOR_AVAILABLE = True
 except ImportError:
     NETWORK_MONITOR_AVAILABLE = False

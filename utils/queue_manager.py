@@ -189,38 +189,98 @@ class QueueManager:
         temp_path = task.get('temp_path')
         retry_count = task.get('retry_count', 0)
         
-        if not message or not event or not temp_path:
+        if not message or not temp_path:
             logger.error(f"Download task missing required data: {filename}")
             return
-            
+        
+        # Check if this is a restored task (serialized objects) vs live task (actual objects)
+        is_restored_task = isinstance(message, dict) or isinstance(event, dict) or not hasattr(event, 'reply')
+        
         try:
             logger.info(f"Executing download task for {filename} (attempt {retry_count + 1})")
             
             # Initialize telegram operations
             telegram_ops = TelegramOperations()
             
-            # Create progress callback (only for active downloads, not queued ones)
+            # Handle status updates based on task type
+            status_msg = None
+            if not is_restored_task and event and hasattr(event, 'reply'):
+                # Live task - can send status updates
+                try:
+                    status_msg = await event.reply(f'⬇️ Downloading {filename}...')
+                except Exception as e:
+                    logger.warning(f"Could not send status message for {filename}: {e}")
+            else:
+                # Restored task - just log progress
+                logger.info(f"Starting download: {filename} (restored task)")
+            
+            # Create progress callback
             start_time = time.time()
-            status_msg = await event.reply(f'⬇️ Downloading {filename}...')
             
-            progress_callback = create_download_progress_callback(
-                status_msg,
-                {
-                    'filename': filename,
-                    'start_time': start_time
-                },
-                start_time,
-                filename=filename
-            )
+            if status_msg:
+                # Full progress callback for live tasks
+                progress_callback = create_download_progress_callback(
+                    status_msg,
+                    {
+                        'filename': filename,
+                        'start_time': start_time
+                    },
+                    start_time,
+                    filename=filename
+                )
+            else:
+                # Simple logging callback for restored tasks
+                def progress_callback(current, total):
+                    if total > 0:
+                        pct = int(current * 100 / total)
+                        if pct % 20 == 0:  # Log every 20%
+                            logger.info(f"Download progress: {filename} - {pct}%")
             
-            # Execute download
+            # Execute download - for restored tasks, we need to reconstruct the message
+            if is_restored_task:
+                # For restored tasks, we need to fetch the message from Telegram
+                # The message dict should contain enough info to identify it
+                if isinstance(message, dict) and 'id' in message and 'peer_id' in message:
+                    from .telegram_operations import get_client
+                    client = get_client()
+                    
+                    # Reconstruct peer from the message data
+                    peer_id = message['peer_id']
+                    if isinstance(peer_id, dict) and 'user_id' in peer_id:
+                        from telethon.tl.types import PeerUser
+                        peer = PeerUser(peer_id['user_id'])
+                    else:
+                        logger.error(f"Cannot reconstruct peer for {filename}")
+                        return
+                    
+                    # Get the actual message object
+                    try:
+                        actual_message = await client.get_messages(peer, ids=message['id'])
+                        if actual_message and actual_message[0]:
+                            message = actual_message[0]
+                        else:
+                            logger.error(f"Could not fetch message for {filename}")
+                            return
+                    except Exception as e:
+                        logger.error(f"Error fetching message for {filename}: {e}")
+                        return
+                else:
+                    logger.error(f"Invalid message data for {filename}")
+                    return
+            
+            # Execute download with the actual message object
             await telegram_ops.download_file_with_progress(message, temp_path, progress_callback)
             
             # Success - update status
             elapsed = time.time() - start_time
             size_mb = os.path.getsize(temp_path) / (1024 * 1024) if os.path.exists(temp_path) else 0
             logger.info(f'Download completed: {filename} ({size_mb:.2f} MB) in {elapsed:.1f}s')
-            await status_msg.edit(f'✅ Download completed: {filename}')
+            
+            if status_msg:
+                try:
+                    await status_msg.edit(f'✅ Download completed: {filename}')
+                except Exception as e:
+                    logger.warning(f"Could not update status message for {filename}: {e}")
             
             # Process the downloaded file based on task type
             task_type = task.get('type', 'unknown')
@@ -231,7 +291,7 @@ class QueueManager:
                     'type': 'extract_and_upload',
                     'temp_archive_path': temp_path,
                     'filename': filename,
-                    'event': event
+                    'event': event if not is_restored_task else None
                 }
                 
                 from . import queue_manager as qm
@@ -242,7 +302,7 @@ class QueueManager:
                 # Add directly to upload queue
                 upload_task = {
                     'type': 'direct_media',
-                    'event': event,
+                    'event': event if not is_restored_task else None,
                     'file_path': temp_path,
                     'filename': filename,
                     'size_bytes': os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
@@ -266,13 +326,22 @@ class QueueManager:
                 
                 await self._add_to_retry_queue(retry_task)
                 
-                if event:
-                    await event.reply(f'⚠️ Download failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
+                # Send status update only for live tasks
+                if not is_restored_task and event and hasattr(event, 'reply'):
+                    try:
+                        await event.reply(f'⚠️ Download failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
+                    except Exception as reply_e:
+                        logger.warning(f"Could not send retry message for {filename}: {reply_e}")
             else:
                 # Max retries reached
                 logger.error(f"Download permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
-                if event:
-                    await event.reply(f'❌ Download permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts')
+                
+                # Send failure notification only for live tasks
+                if not is_restored_task and event and hasattr(event, 'reply'):
+                    try:
+                        await event.reply(f'❌ Download permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts')
+                    except Exception as reply_e:
+                        logger.warning(f"Could not send failure message for {filename}: {reply_e}")
                 
                 # Clean up
                 try:

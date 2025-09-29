@@ -708,8 +708,47 @@ async def get_video_attributes_and_thumbnail(input_path: str) -> tuple:
 async def process_direct_media_upload(event, file_path: str, filename: str):
     """Process direct media upload (images or videos) to target user"""
     try:
+        # Check if we've already processed a file with the same name and exact size
+        # Since the size is exact, this is a reliable indicator that it's the same file
+        size_bytes = os.path.getsize(file_path)
+        already_processed = False
+        for file_hash, info in processed_cache.items():
+            if info.get('filename') == filename and info.get('size') == size_bytes:
+                already_processed = True
+                break
+        
+        if already_processed:
+            await event.reply(f'⏩ Direct media {filename} with size {human_size(size_bytes)} was already processed. Skipping upload.')
+            
+            # Clean up the temporary downloaded file
+            try:
+                os.remove(file_path)
+                logger.info(f'Cleaned up already processed file: {file_path}')
+            except Exception as e:
+                logger.warning(f'Failed to clean up already processed file {file_path}: {e}')
+            
+            return
+
         await event.reply(f'📤 Uploading media file: {filename}')
         target = await ensure_target_entity()
+        
+        # Update cache with the new file information (but only after successful upload)
+        file_hash = None
+        try:
+            file_hash = compute_sha256(file_path)
+            if file_hash in processed_cache:
+                await event.reply('⏩ Media file already processed earlier (hash match). Skipping upload.')
+                
+                # Clean up the temporary downloaded file
+                try:
+                    os.remove(file_path)
+                    logger.info(f'Cleaned up already processed file: {file_path}')
+                except Exception as e:
+                    logger.warning(f'Failed to clean up already processed file {file_path}: {e}')
+                
+                return
+        except Exception as e:
+            logger.warning(f'Hashing failed (continuing): {e}')
         
         # Create progress callback for upload
         upload_status_msg = await event.reply('Starting upload...')
@@ -836,6 +875,15 @@ async def process_direct_media_upload(event, file_path: str, filename: str):
                 # Clean up thumbnail
                 if thumbnail_path and os.path.exists(thumbnail_path):
                     os.remove(thumbnail_path)
+        
+        # Update cache after successful upload
+        if file_hash:
+            processed_cache[file_hash] = {
+                'filename': filename,
+                'time': int(time.time()),
+                'size': size_bytes
+            }
+            await save_cache()
         
         await upload_status_msg.edit(f'✅ Upload complete: {filename}')
         await event.reply(f'✅ Media file {filename} successfully uploaded to {TARGET_USERNAME}')
@@ -1831,6 +1879,18 @@ async def watcher(event):
             # Check if we're already processing or have pending password
             if current_processing or pending_password:
                 await event.reply(f'⚠️ Currently processing another file. Media {filename} will be queued.')
+            
+            # Check if we've already processed a file with the same name and exact size
+            # Since the size is exact, this is a reliable indicator that it's the same file
+            already_processed = False
+            for file_hash, info in processed_cache.items():
+                if info.get('filename') == filename and info.get('size') == size_bytes:
+                    already_processed = True
+                    break
+            
+            if already_processed:
+                await event.reply(f'⏩ Direct media {filename} with size {human_size(size_bytes)} was already processed. Skipping download and upload.')
+                return
             
             # Create a temporary path for the media file
             temp_media_path = os.path.join(DATA_DIR, filename)

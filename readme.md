@@ -9,6 +9,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Direct Media Upload**: Send images/videos directly to the user account and they will be re-uploaded to the target user as media in the Media tab.
 - **Media Filtering**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm).
 - **Duplicate Detection**: Avoids reprocessing archives that have been previously processed by maintaining a cache of file hashes.
+- **Duplicate Detection for Direct Media**: Avoids reprocessing direct media uploads that have been previously processed by maintaining a cache of file hashes.
 - **Efficient Storage Management**: Deletes the original compressed file and the extracted files after uploading to save storage space.
 - **Password Protected Archive Support**: Handles password-protected archives with a simple command interface.
 - **Fast Video Compression**: Automatically compresses all video files to MP4 format optimized for Telegram streaming.
@@ -99,12 +100,22 @@ In addition to processing compressed archives, you can now send images and video
 
 1.  **Send an image or video** directly to your user account.
 2.  The script will automatically:
-    -   Download the media file.
+    -   Check if the media file has been processed before using hash-based deduplication.
+    -   Download the media file (if not previously processed).
     -   Upload it to the target user as a native media file (photo or video).
     -   The file will appear in the target user's Media tab.
     -   Delete the local file after upload.
 
 This feature is particularly useful when you want to optimize media files for Telegram or re-upload them to another account while ensuring they appear properly in the Media tab.
+
+### Duplicate Detection for Direct Media
+
+Similar to compressed archives, the script now implements duplicate detection for direct media uploads:
+
+- The script checks if a media file with the same name and exact size has been previously processed
+- If a match is found, the script skips downloading and uploading the file entirely
+- This saves bandwidth and processing time for identical media files
+- The duplicate detection uses SHA256 hashing for definitive verification after download
 
 ### Video Quality and Thumbnail Fixes
 

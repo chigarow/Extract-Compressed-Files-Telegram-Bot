@@ -500,8 +500,17 @@ class QueueManager:
                 'uploaded': True
             })
             
-            await upload_msg.edit(f"✅ Upload completed: {filename}")
+            if upload_msg:
+                await upload_msg.edit(f"✅ Upload completed: {filename}")
             logger.info(f"Upload completed successfully: {filename}")
+            
+            # Clean up file only on successful upload
+            try:
+                if file_path and os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info(f"Cleaned up file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up file {file_path}: {e}")
             
         except Exception as e:
             retry_count = task.get('retry_count', 0) + 1
@@ -522,19 +531,22 @@ class QueueManager:
                 # Send retry notification only if event is available
                 if event and hasattr(event, 'reply'):
                     await event.reply(f'⚠️ Upload failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
+                
+                # Don't clean up file - keep it for retry
+                logger.info(f"Keeping file for retry: {file_path}")
             else:
-                # Max retries reached
+                # Max retries reached - now clean up file
                 logger.error(f"Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
                 if event and hasattr(event, 'reply'):
                     await event.reply(f"❌ Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
-        finally:
-            # Clean up file
-            try:
-                if file_path and os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Cleaned up file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up file {file_path}: {e}")
+                
+                # Clean up file after max retries
+                try:
+                    if file_path and os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"Cleaned up file after max retries: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up file {file_path}: {e}")
     
     def get_queue_status(self) -> dict:
         """Get current queue status."""

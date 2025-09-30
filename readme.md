@@ -574,6 +574,26 @@ ExtractCompressedFiles/
     └── session.session               # Telegram session data
 ```
 
+## Recent Improvements
+
+### Upload Task Error Fixes (September 2025)
+- **Fixed 'NoneType' object has no attribute 'edit' errors**: Upload tasks now properly handle null message objects when processing background tasks or restored queue items
+- **Fixed premature file cleanup**: Files are now preserved during retry attempts and only cleaned up after successful uploads or max retry attempts  
+- **Enhanced retry mechanism**: Upload retries now work correctly without file conflicts, improving reliability for temporary network issues
+- **Background task stability**: Upload tasks can now run silently without UI dependencies when events are not available
+
+### Parallel Processing Enhancement (September 2025)
+- **Concurrent workflow execution**: Downloads, compression, and uploads now run in parallel instead of sequentially
+- **Improved throughput**: Multiple files can be processed simultaneously across different pipeline stages
+- **Better resource utilization**: The system now efficiently uses available CPU and network resources
+- **Reduced wait times**: Files begin uploading as soon as they're ready rather than waiting for all downloads to complete
+
+### Transcode Configuration Control (September 2025)  
+- **Configurable video processing**: Added `TRANSCODE_ENABLED` setting in `secrets.properties` to control video compression
+- **Smart processing decisions**: Videos are only processed when transcode is enabled or format conversion is required
+- **Optimized .ts file handling**: Transport Stream files are always converted to MP4 for optimal Telegram compatibility
+- **Selective transcoding**: Only processes videos that actually need compression or format conversion
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import json
-from .constants import DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT
+from .constants import DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS, RETRY_BASE_INTERVAL
 from .cache_manager import PersistentQueue
 from .constants import DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE, RETRY_QUEUE_FILE
 
@@ -423,8 +423,12 @@ class QueueManager:
             telegram_ops = TelegramOperations(client)
             cache_manager = CacheManager()
             
-            # Notify start of upload (only for active uploads)
-            upload_msg = await event.reply(f'📤 Uploading {filename}...')
+            # Notify start of upload (only for active uploads with valid event)
+            upload_msg = None
+            if event and hasattr(event, 'reply'):
+                upload_msg = await event.reply(f'📤 Uploading {filename}...')
+            else:
+                logger.info(f"📤 Uploading {filename}... (background task)")
             
             # Get target entity
             target = await ensure_target_entity(client)
@@ -440,7 +444,10 @@ class QueueManager:
                     else:
                         compressed_path = base_path + '_compressed' + ext
                     
-                    await upload_msg.edit(f"🎬 Processing video: {filename}...")
+                    if upload_msg:
+                        await upload_msg.edit(f"🎬 Processing video: {filename}...")
+                    else:
+                        logger.info(f"🎬 Processing video: {filename}...")
                     
                     compressed_result = await compress_video_for_telegram(file_path, compressed_path)
                     if compressed_result and os.path.exists(compressed_result):
@@ -457,7 +464,15 @@ class QueueManager:
                     logger.info(f"Skipping video processing for {filename} (transcoding disabled or .ts file)")
             
             # Upload the media file with progress tracking
-            progress_callback = telegram_ops.create_progress_callback(upload_msg, filename)
+            if upload_msg:
+                progress_callback = telegram_ops.create_progress_callback(upload_msg, filename)
+            else:
+                # Create a simple logging callback for background tasks
+                def progress_callback(current, total):
+                    if total > 0:
+                        pct = int(current * 100 / total)
+                        if pct % 20 == 0:  # Log every 20%
+                            logger.info(f"Upload progress: {filename} - {pct}%")
             
             # Add archive name to caption if it's from an archive
             archive_name = task.get('archive_name')
@@ -504,11 +519,14 @@ class QueueManager:
                 
                 await self._add_to_retry_queue(retry_task)
                 
-                await event.reply(f'⚠️ Upload failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
+                # Send retry notification only if event is available
+                if event and hasattr(event, 'reply'):
+                    await event.reply(f'⚠️ Upload failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
             else:
                 # Max retries reached
                 logger.error(f"Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
-                await event.reply(f"❌ Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
+                if event and hasattr(event, 'reply'):
+                    await event.reply(f"❌ Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
         finally:
             # Clean up file
             try:

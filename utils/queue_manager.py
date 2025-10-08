@@ -322,13 +322,13 @@ class QueueManager:
                 except Exception as e:
                     logger.warning(f"Could not update status message for {filename}: {e}")
             
-            # Immediately start the next phase of processing asynchronously
-            # This allows the download queue to continue processing other files
+            # Process sequentially - wait for each phase to complete before proceeding
+            # This prevents parallel processing and reduces memory usage
             task_type = task.get('type', 'unknown')
             
             if task_type == 'archive_download':
-                # Start processing extraction and upload in background
-                logger.info(f"Starting background processing for {filename}")
+                # Process extraction and upload sequentially (wait for completion)
+                logger.info(f"Starting sequential processing for {filename}")
                 processing_task = {
                     'type': 'extract_and_upload',
                     'temp_archive_path': temp_path,
@@ -336,12 +336,12 @@ class QueueManager:
                     'event': event if not is_restored_task else None
                 }
                 
-                # Start processing asynchronously without blocking download queue
-                asyncio.create_task(self._process_extraction_and_upload(processing_task))
+                # Wait for processing to complete before continuing to next download
+                await self._process_extraction_and_upload(processing_task)
                 
             elif task_type == 'direct_media_download':
-                # Start compression and upload in background
-                logger.info(f"Starting background compression and upload for {filename}")
+                # Process compression and upload sequentially (wait for completion)
+                logger.info(f"Starting sequential compression and upload for {filename}")
                 upload_task = {
                     'type': 'direct_media',
                     'event': event if not is_restored_task else None,
@@ -350,8 +350,8 @@ class QueueManager:
                     'size_bytes': os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
                 }
                 
-                # Start compression and upload asynchronously
-                asyncio.create_task(self._process_direct_media_upload(upload_task))
+                # Wait for compression and upload to complete before continuing
+                await self._process_direct_media_upload(upload_task)
             
         except Exception as e:
             retry_count += 1

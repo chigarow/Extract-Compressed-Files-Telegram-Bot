@@ -15,7 +15,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Proper Video Attributes**: Videos now have correct duration and thumbnail for proper display in Telegram (fixes black thumbnails and 00:00 duration).
 - **Media Tab Support**: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
 - **Grouped Media Uploads**: Uploads images and videos as separate grouped albums with archive name as caption.
-- **Queue Management System**: Limits to 2 concurrent downloads and 2 concurrent uploads to prevent API rate limits, with all incoming files queued and processed according to the limits.
+- **Sequential Processing**: Fully sequential file processing (download → compress → upload → cleanup) to prevent memory issues on low-resource devices like Android Termux. Only one file is processed at a time to minimize memory usage.
 - **Crash Recovery System**: Current processing state is saved to `current_process.json` every minute to persist across restarts, ensuring graceful recovery after crashes.
 - **Automatic Retry for Failed Operations**: Failed operations (due to FloodWaitError or other network issues) are automatically saved to `failed_operations.json` and retried every 30 minutes.
 - **FastTelethon Parallel Downloads**: Automatic 10-20x speed acceleration for large files using parallel MTProto connections.
@@ -23,7 +23,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Progress Tracking**: Provides real-time status updates during download, extraction, and upload processes.
 - **Configurable Limits**: Adjustable settings for maximum file size, disk space requirements, and concurrent processing.
 - **Queue Monitoring**: Built-in status command to check current processing state.
-- **Concurrent Downloads**: Supports multiple simultaneous downloads with sequential extraction/upload processing.
+- **Sequential File Processing**: Files are processed one at a time (download → compress → upload → cleanup) to minimize memory usage on low-resource devices.
 - **Network Monitoring**: WiFi-only mode with intelligent network detection for mobile data conservation.
 - **Battery Monitoring**: Built-in battery status monitoring for Termux users.
 - **Compression Timeout Control**: Configurable timeout settings for video compression operations.
@@ -156,16 +156,30 @@ The script now uploads media files as grouped albums for better organization:
 
 This feature makes it easier to identify which files came from which archive.
 
-### Queue Management System
+### Sequential Processing for Low-Resource Devices
 
-The script now includes a comprehensive queue management system to control resource usage:
+The script implements **fully sequential file processing** optimized for low-resource devices like Android Termux:
 
-- Download queue: Limits to 2 concurrent downloads to prevent API rate limits
-- Upload queue: Limits to 2 concurrent uploads to prevent API rate limits
-- All incoming files are queued and processed according to the limits
+**Processing Flow:**
+```
+Download File 1 → Compress File 1 → Upload File 1 → Cleanup File 1
+    ↓ (complete)
+Download File 2 → Compress File 2 → Upload File 2 → Cleanup File 2
+    ↓ (complete)
+Download File 3 → Compress File 3 → Upload File 3 → Cleanup File 3
+```
+
+**Memory Optimization:**
+- Only **one file is processed at a time** from start to finish
+- Each file completes its entire lifecycle (download → compression → upload → cleanup) before the next file starts
+- Prevents memory buildup from multiple files being processed simultaneously
+- Designed specifically to prevent out-of-memory crashes on Android Termux
+
+**Queue System:**
+- All incoming files are queued and processed one by one
 - Queue status is reported to the user with position information
-- Queued operations are persisted to files (`download_queue.json` and `upload_queue.json`) and restored on restart
-- This ensures stable performance even with high volume file traffic
+- Queued operations are persisted to `download_queue.json` and `upload_queue.json` and restored on restart
+- Ensures stable performance even on devices with limited RAM
 
 ### Crash Recovery System
 
@@ -474,7 +488,7 @@ The project has been refactored into a modular architecture for better maintaina
   - **`media_processing.py`** - Video processing and media format validation
   - **`telegram_operations.py`** - Telegram client operations and file transfers
   - **`cache_manager.py`** - File processing cache and persistent data management
-  - **`queue_manager.py`** - Download/upload queue management with concurrency control
+  - **`queue_manager.py`** - Download/upload queue management with sequential processing control
   - **`command_handlers.py`** - User command processing and interaction handling
   - **`fast_download.py`** - FastTelethon parallel download implementation
   - **`network_monitor.py`** - Network connectivity monitoring and WiFi-only mode utilities
@@ -487,7 +501,7 @@ Each module handles a specific aspect of functionality:
 - **Media Processing**: Video format validation, ffmpeg operations, thumbnail generation
 - **Telegram Operations**: File uploads/downloads, progress tracking, message handling
 - **Cache Management**: Processed file tracking, persistent queues, crash recovery
-- **Queue Management**: Concurrent download/upload control, task scheduling
+- **Queue Management**: Sequential download/upload processing, task scheduling, memory optimization
 - **Command Handling**: User interaction, configuration updates, status reporting
 - **Network Monitoring**: Connection type detection, WiFi-only mode, network status callbacks
 
@@ -499,7 +513,7 @@ This modular design makes the codebase easier to maintain, test, and extend with
 2. It listens for incoming messages containing document attachments with recognized archive extensions
 3. When an archive is detected:
    - It checks if the file has been processed before using SHA256 hash verification
-   - Downloads the file with progress tracking using the queue management system
+   - Downloads the file with progress tracking using the sequential processing queue system
    - Verifies sufficient disk space is available
    - Extracts the contents using specialized extraction tools
    - Scans for media files (images and videos) using media processing utilities

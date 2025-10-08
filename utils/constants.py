@@ -59,9 +59,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 MIN_PCT_STEP = 5
 MIN_EDIT_INTERVAL = 7  # seconds
 
-# Queue concurrency limits
-DOWNLOAD_SEMAPHORE_LIMIT = 2  # Allow max 2 concurrent downloads
-UPLOAD_SEMAPHORE_LIMIT = 2    # Allow max 2 concurrent uploads
+# Queue concurrency limits - Set to 1 for fully sequential processing
+# This prevents parallel processing and reduces memory usage on low-resource devices
+DOWNLOAD_SEMAPHORE_LIMIT = 1  # Process only 1 download at a time
+UPLOAD_SEMAPHORE_LIMIT = 1    # Process only 1 upload at a time
 
 # Retry mechanism settings
 MAX_RETRY_ATTEMPTS = 5        # Maximum retry attempts per operation

@@ -128,10 +128,16 @@ async def get_torbox_metadata(api_key: str, web_id: Optional[str] = None) -> Opt
         )
         
         # Get web downloads list
-        result = sdk.web_downloads_debrid.get_web_download_list(
-            api_version="v1",
-            id_=str(web_id) if web_id else None
-        )
+        # Note: Don't pass id_ parameter if None - SDK validator rejects None explicitly
+        if web_id:
+            result = sdk.web_downloads_debrid.get_web_download_list(
+                api_version="v1",
+                id_=str(web_id)
+            )
+        else:
+            result = sdk.web_downloads_debrid.get_web_download_list(
+                api_version="v1"
+            )
         
         if result and hasattr(result, 'data'):
             return result.data
@@ -310,7 +316,7 @@ async def download_torbox_with_progress(
     if not filename:
         filename = os.path.basename(output_path)
     
-    async def progress_callback(current: int, total: int):
+    def progress_callback(current: int, total: int):
         nonlocal last_edit_time, last_edit_pct
         
         if total <= 0:
@@ -334,7 +340,8 @@ async def download_torbox_with_progress(
                 f'{human_size(current)} / {human_size(total)}'
             )
             try:
-                await status_msg.edit(txt)
+                # Schedule the coroutine to run in the event loop without blocking
+                asyncio.create_task(status_msg.edit(txt))
                 last_edit_pct = pct
                 last_edit_time = now
             except Exception as e:

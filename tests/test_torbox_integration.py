@@ -375,7 +375,8 @@ class TestSDKIntegration:
         mock_sdk = Mock()
         mock_sdk.web_downloads_debrid.get_web_download_list = Mock(return_value=mock_response)
         
-        with patch('utils.torbox_downloader.TorboxApi', return_value=mock_sdk):
+        # Patch torbox_api.TorboxApi since it's imported inside the function
+        with patch('torbox_api.TorboxApi', return_value=mock_sdk):
             metadata = await get_torbox_metadata(mock_api_key)
             
             assert metadata is not None, "Should return metadata"

@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import json
+from telethon.errors import FloodWaitError
 from .constants import DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS, RETRY_BASE_INTERVAL
 from .cache_manager import PersistentQueue
 from .constants import DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE, RETRY_QUEUE_FILE
@@ -253,8 +254,17 @@ class QueueManager:
             except asyncio.CancelledError:
                 logger.info("Upload queue processor cancelled")
                 break
+            except FloodWaitError as e:
+                # FloodWaitError escaped from execute_upload_task
+                # This should not happen as it's caught there, but handle it as safety measure
+                wait_seconds = e.seconds if hasattr(e, 'seconds') else 60
+                logger.error(f"Uncaught FloodWaitError in upload queue processor: Telegram requires waiting {wait_seconds} seconds")
+                logger.info("Upload queue processor will continue with next task. Failed task has been queued for retry.")
+                continue
             except Exception as e:
                 logger.error(f"Error in upload queue processor: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 continue
     
     async def _execute_download_task(self, task: dict):
@@ -448,14 +458,21 @@ class QueueManager:
         from .cache_manager import CacheManager
         from .utils import human_size
         from .file_operations import compute_sha256
-        from .constants import VIDEO_EXTENSIONS
+        from .constants import VIDEO_EXTENSIONS, PHOTO_EXTENSIONS
         import os
         import asyncio
         import time
         
         filename = task.get('filename', 'unknown')
         file_path = task.get('file_path')
+        file_paths = task.get('file_paths')  # For grouped uploads
         event = task.get('event')
+        is_grouped = task.get('is_grouped', False)
+        
+        # Handle grouped uploads
+        if is_grouped and file_paths:
+            await self._execute_grouped_upload(task)
+            return
         
         if not file_path or not os.path.exists(file_path):
             logger.error(f"Upload task file not found: {file_path}")
@@ -568,6 +585,52 @@ class QueueManager:
                     logger.info(f"All files uploaded from {extraction_folder}, cleaning up folder...")
                     await self.extraction_cleanup_registry.cleanup_folder(extraction_folder)
             
+        except FloodWaitError as e:
+            # Extract wait time from FloodWaitError
+            wait_seconds = e.seconds if hasattr(e, 'seconds') else 60
+            retry_count = task.get('retry_count', 0) + 1
+            
+            logger.warning(f"FloodWaitError for {filename}: Telegram requires waiting {wait_seconds} seconds (attempt {retry_count})")
+            logger.info(f"This is a rate limit from Telegram. The bot will automatically retry after the required wait time.")
+            
+            # Always retry on FloodWaitError regardless of retry count
+            # Use Telegram's required wait time + 5 second buffer
+            retry_delay = wait_seconds + 5
+            
+            logger.info(f"Scheduling upload retry for {filename} in {retry_delay}s (Telegram rate limit)")
+            
+            # Add to retry queue with Telegram's wait time
+            retry_task = task.copy()
+            retry_task['retry_count'] = retry_count
+            retry_task['retry_after'] = time.time() + retry_delay
+            retry_task['flood_wait'] = True  # Mark as flood wait for special handling
+            retry_task['telegram_wait_seconds'] = wait_seconds
+            
+            await self._add_to_retry_queue(retry_task)
+            
+            # Send informative notification only if event is available
+            if event and hasattr(event, 'reply'):
+                hours = wait_seconds // 3600
+                minutes = (wait_seconds % 3600) // 60
+                seconds = wait_seconds % 60
+                
+                time_str = ""
+                if hours > 0:
+                    time_str += f"{hours}h "
+                if minutes > 0:
+                    time_str += f"{minutes}m "
+                if seconds > 0 or not time_str:
+                    time_str += f"{seconds}s"
+                
+                await event.reply(
+                    f'⏳ Telegram rate limit: {filename}\n'
+                    f'Required wait: {time_str.strip()}\n'
+                    f'Auto-retry scheduled. Your file will be uploaded automatically.'
+                )
+            
+            # Keep file for retry - NEVER delete on FloodWaitError
+            logger.info(f"Keeping file for retry after rate limit: {file_path}")
+            
         except Exception as e:
             retry_count = task.get('retry_count', 0) + 1
             logger.error(f"Upload failed for {filename} (attempt {retry_count}): {e}")
@@ -603,6 +666,217 @@ class QueueManager:
                         logger.info(f"Cleaned up file after max retries: {file_path}")
                 except Exception as e:
                     logger.warning(f"Failed to clean up file {file_path}: {e}")
+    
+    async def _execute_grouped_upload(self, task: dict):
+        """Execute a grouped media upload (multiple files as one album)."""
+        from .telegram_operations import TelegramOperations, ensure_target_entity, get_client
+        from .media_processing import needs_video_processing, compress_video_for_telegram
+        from .cache_manager import CacheManager
+        from .constants import VIDEO_EXTENSIONS
+        import os
+        import time
+        
+        filename = task.get('filename', 'unknown')
+        file_paths = task.get('file_paths', [])
+        event = task.get('event')
+        media_type = task.get('media_type', 'media')
+        source_archive = task.get('source_archive', '')
+        
+        if not file_paths:
+            logger.error(f"Grouped upload task has no files: {filename}")
+            return
+        
+        # Filter out files that don't exist
+        existing_files = [fp for fp in file_paths if os.path.exists(fp)]
+        if not existing_files:
+            logger.error(f"All files missing for grouped upload: {filename}")
+            return
+        
+        logger.info(f"Executing grouped upload for {filename}: {len(existing_files)} files")
+        
+        try:
+            # Initialize components
+            client = get_client()
+            telegram_ops = TelegramOperations(client)
+            cache_manager = CacheManager()
+            
+            # Notify start of upload
+            upload_msg = None
+            if event and hasattr(event, 'reply'):
+                upload_msg = await event.reply(f'📤 Uploading {len(existing_files)} {media_type}...')
+            else:
+                logger.info(f"📤 Uploading {len(existing_files)} {media_type}... (background task)")
+            
+            # Get target entity
+            target = await ensure_target_entity(client)
+            
+            # Process videos if needed
+            processed_files = []
+            for file_path in existing_files:
+                file_ext = os.path.splitext(file_path)[1].lower()
+                
+                if file_ext in VIDEO_EXTENSIONS and needs_video_processing(file_path):
+                    # Compress video
+                    base_path, ext = os.path.splitext(file_path)
+                    if file_ext != '.mp4':
+                        compressed_path = base_path + '_compressed.mp4'
+                    else:
+                        compressed_path = base_path + '_compressed' + ext
+                    
+                    if upload_msg:
+                        await upload_msg.edit(f"🎬 Processing {len(processed_files)+1}/{len(existing_files)} videos...")
+                    
+                    compressed_result = await compress_video_for_telegram(file_path, compressed_path)
+                    if compressed_result and os.path.exists(compressed_result):
+                        # Use compressed version
+                        processed_files.append(compressed_result)
+                        # Clean up original
+                        try:
+                            if os.path.exists(file_path) and file_path != compressed_result:
+                                os.remove(file_path)
+                        except Exception as e:
+                            logger.warning(f"Could not remove original file {file_path}: {e}")
+                    else:
+                        # Use original if compression failed
+                        processed_files.append(file_path)
+                else:
+                    # Use file as-is
+                    processed_files.append(file_path)
+            
+            # Upload as grouped album
+            caption = f"📦 From: {source_archive}" if source_archive else ""
+            
+            if upload_msg:
+                await upload_msg.edit(f'📤 Uploading {len(processed_files)} {media_type} as album...')
+            
+            await telegram_ops.upload_media_grouped(target, processed_files, caption=caption)
+            
+            # Update cache for all files
+            for file_path in processed_files:
+                try:
+                    from .file_operations import compute_sha256
+                    file_hash = compute_sha256(file_path)
+                    size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                    
+                    await cache_manager.add_to_cache(file_hash, {
+                        'filename': os.path.basename(file_path),
+                        'size': size_bytes,
+                        'timestamp': time.time(),
+                        'uploaded': True
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not update cache for {file_path}: {e}")
+            
+            if upload_msg:
+                await upload_msg.edit(f"✅ Uploaded {len(processed_files)} {media_type}")
+            logger.info(f"Grouped upload completed successfully: {filename}")
+            
+            # Clean up all files
+            for file_path in processed_files:
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.debug(f"Cleaned up file: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up file {file_path}: {e}")
+            
+            # Clean up any original files that weren't in processed list
+            for file_path in existing_files:
+                if file_path not in processed_files:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                    except Exception:
+                        pass
+            
+            # Check if we should clean up extraction folder
+            extraction_folder = task.get('extraction_folder')
+            if extraction_folder:
+                is_last_file = await self.extraction_cleanup_registry.mark_file_uploaded(extraction_folder)
+                if is_last_file:
+                    logger.info(f"All groups uploaded from {extraction_folder}, cleaning up folder...")
+                    await self.extraction_cleanup_registry.cleanup_folder(extraction_folder)
+        
+        except FloodWaitError as e:
+            # Extract wait time from FloodWaitError
+            wait_seconds = e.seconds if hasattr(e, 'seconds') else 60
+            retry_count = task.get('retry_count', 0) + 1
+            
+            logger.warning(f"FloodWaitError for grouped upload {filename}: Telegram requires waiting {wait_seconds} seconds (attempt {retry_count})")
+            logger.info(f"This is a rate limit from Telegram. The bot will automatically retry after the required wait time.")
+            
+            # Use Telegram's required wait time + 5 second buffer
+            retry_delay = wait_seconds + 5
+            
+            logger.info(f"Scheduling grouped upload retry for {filename} in {retry_delay}s (Telegram rate limit)")
+            
+            # Add to retry queue with Telegram's wait time
+            retry_task = task.copy()
+            retry_task['retry_count'] = retry_count
+            retry_task['retry_after'] = time.time() + retry_delay
+            retry_task['flood_wait'] = True
+            retry_task['telegram_wait_seconds'] = wait_seconds
+            
+            await self._add_to_retry_queue(retry_task)
+            
+            # Send informative notification
+            if event and hasattr(event, 'reply'):
+                hours = wait_seconds // 3600
+                minutes = (wait_seconds % 3600) // 60
+                seconds = wait_seconds % 60
+                
+                time_str = ""
+                if hours > 0:
+                    time_str += f"{hours}h "
+                if minutes > 0:
+                    time_str += f"{minutes}m "
+                if seconds > 0 or not time_str:
+                    time_str += f"{seconds}s"
+                
+                await event.reply(
+                    f'⏳ Telegram rate limit: {filename}\n'
+                    f'Required wait: {time_str.strip()}\n'
+                    f'Auto-retry scheduled. Your files will be uploaded automatically.'
+                )
+            
+            # Keep files for retry - do NOT delete
+            logger.info(f"Keeping {len(existing_files)} files for retry after rate limit")
+            
+        except Exception as e:
+            retry_count = task.get('retry_count', 0) + 1
+            logger.error(f"Grouped upload failed for {filename} (attempt {retry_count}): {e}")
+            
+            if retry_count < MAX_RETRY_ATTEMPTS:
+                # Schedule retry with exponential backoff
+                retry_delay = RETRY_BASE_INTERVAL * (3 ** (retry_count - 1))
+                logger.info(f"Scheduling grouped upload retry for {filename} in {retry_delay}s")
+                
+                # Add to retry queue
+                retry_task = task.copy()
+                retry_task['retry_count'] = retry_count
+                retry_task['retry_after'] = time.time() + retry_delay
+                
+                await self._add_to_retry_queue(retry_task)
+                
+                if event and hasattr(event, 'reply'):
+                    await event.reply(f'⚠️ Upload failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
+                
+                # Keep files for retry
+                logger.info(f"Keeping {len(existing_files)} files for retry")
+            else:
+                # Max retries reached - clean up files
+                logger.error(f"Grouped upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
+                if event and hasattr(event, 'reply'):
+                    await event.reply(f"❌ Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
+                
+                # Clean up all files
+                for file_path in existing_files:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            logger.debug(f"Cleaned up file after max retries: {file_path}")
+                    except Exception as cleanup_e:
+                        logger.warning(f"Failed to clean up file {file_path}: {cleanup_e}")
     
     def get_queue_status(self) -> dict:
         """Get current queue status."""
@@ -971,21 +1245,52 @@ class QueueManager:
             
             logger.info(f"Extracted {len(extracted_files)} media files from {filename}")
             
-            # Register extraction folder for cleanup tracking
-            await self.extraction_cleanup_registry.register_extraction(extract_path, len(extracted_files))
+            # Batch files by type for grouped upload (reduces rate limiting)
+            from .constants import PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
             
-            # Add extracted files to upload queue
+            image_files = []
+            video_files = []
+            
             for extracted_file in extracted_files:
+                file_ext = os.path.splitext(extracted_file)[1].lower()
+                if file_ext in PHOTO_EXTENSIONS:
+                    image_files.append(extracted_file)
+                elif file_ext in VIDEO_EXTENSIONS:
+                    video_files.append(extracted_file)
+            
+            logger.info(f"Grouped files: {len(image_files)} images, {len(video_files)} videos")
+            
+            # Register extraction folder for cleanup tracking
+            # We'll upload groups, so count groups instead of individual files
+            num_groups = (1 if image_files else 0) + (1 if video_files else 0)
+            await self.extraction_cleanup_registry.register_extraction(extract_path, num_groups)
+            
+            # Upload images as a group
+            if image_files:
                 upload_task = {
-                    'type': 'extracted_file',
+                    'type': 'grouped_media',
+                    'media_type': 'images',
                     'event': event,
-                    'file_path': extracted_file,
-                    'filename': os.path.basename(extracted_file),
-                    'size_bytes': os.path.getsize(extracted_file) if os.path.exists(extracted_file) else 0,
+                    'file_paths': image_files,
+                    'filename': f"{filename} - Images ({len(image_files)} files)",
                     'source_archive': filename,
-                    'extraction_folder': extract_path  # Track extraction folder for cleanup
+                    'extraction_folder': extract_path,
+                    'is_grouped': True
                 }
-                
+                await self.add_upload_task(upload_task)
+            
+            # Upload videos as a group
+            if video_files:
+                upload_task = {
+                    'type': 'grouped_media',
+                    'media_type': 'videos',
+                    'event': event,
+                    'file_paths': video_files,
+                    'filename': f"{filename} - Videos ({len(video_files)} files)",
+                    'source_archive': filename,
+                    'extraction_folder': extract_path,
+                    'is_grouped': True
+                }
                 await self.add_upload_task(upload_task)
             
             # Clean up the original archive

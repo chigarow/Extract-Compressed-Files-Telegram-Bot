@@ -247,7 +247,7 @@ class TelegramOperations:
     def create_progress_callback(self, status_msg, file_type: str = "file"):
         """Create a progress callback for upload/download operations."""
         start_time = time.time()
-        last_edit_pct = -10
+        last_edit_pct = -15
         last_edit_time = 0
         
         async def progress_callback(current, total):
@@ -260,16 +260,24 @@ class TelegramOperations:
             speed = current / elapsed if elapsed > 0 else 0
             eta = (total - current) / speed if speed > 0 else float('inf')
             
-            # More conservative throttling to prevent rate limits
-            # Update only every 10% and minimum 10 seconds apart
-            if (pct >= last_edit_pct + 10) or ((now - last_edit_time) > 10):
+            # Very conservative throttling to prevent rate limits
+            # Update only every 15% and minimum 15 seconds apart
+            # This reduces API calls significantly during large uploads
+            if (pct >= last_edit_pct + 15) or ((now - last_edit_time) > 15):
                 txt = f'📤 Uploading {file_type}: {pct}% | {human_size(speed)}/s | ETA: {format_eta(eta)}'
                 try:
                     await status_msg.edit(txt)
                     last_edit_pct = pct
                     last_edit_time = now
-                except Exception:
-                    pass  # Ignore edit errors (rate limits, etc.)
+                    logger.debug(f"Progress update sent: {pct}% for {file_type}")
+                except FloodWaitError as e:
+                    # If even progress updates hit rate limits, log and continue silently
+                    logger.warning(f"Progress update hit rate limit (wait {e.seconds}s), skipping updates")
+                    # Set last_edit_time far in future to prevent further updates
+                    last_edit_time = now + e.seconds
+                except Exception as e:
+                    logger.debug(f"Progress update failed: {e}")
+                    pass  # Ignore other edit errors
         
         return progress_callback
 

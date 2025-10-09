@@ -4,6 +4,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 
 ## Features
 
+- **Interactive Chat-Based Authentication**: First-time login is handled through Telegram's "Saved Messages" chat, eliminating the need for terminal input. Perfect for background processes and non-interactive environments. See [INTERACTIVE_LOGIN.md](INTERACTIVE_LOGIN.md) for details.
 - **User Account Based Access**: Uses a user account (not a bot token) for authentication, controlled by specifying a target username in the configuration.
 - **Automatic Extraction**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz.
 - **Torbox CDN Downloads**: Automatically detects and downloads files from Torbox CDN links sent in text messages.

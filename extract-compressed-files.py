@@ -107,6 +107,138 @@ current_processing = None
 semaphore = asyncio.Semaphore(1)  # Will be updated with config
 cancelled_operations = set()
 
+# Interactive login state
+login_state = {
+    'waiting_for': None,  # 'phone', 'code', 'password'
+    'phone_callback': None,
+    'code_callback': None,
+    'password_callback': None
+}
+
+
+def create_interactive_login_handlers():
+    """Create handlers for interactive login through chat."""
+    
+    async def phone_callback():
+        """Called by Telethon when it needs the phone number."""
+        logger.info("Phone number required - waiting for user input via chat")
+        login_state['waiting_for'] = 'phone'
+        
+        # Send message to self (saved messages)
+        try:
+            await client.send_message('me', '📱 **Phone Number Required**\n\n'
+                                             'Please reply with your phone number in international format.\n'
+                                             'Format: +1234567890')
+        except Exception as e:
+            logger.error(f"Failed to send phone request message: {e}")
+        
+        # Wait for phone to be provided
+        phone_future = asyncio.get_event_loop().create_future()
+        login_state['phone_callback'] = phone_future
+        
+        phone = await phone_future
+        login_state['waiting_for'] = None
+        login_state['phone_callback'] = None
+        logger.info("Received phone number from user")
+        return phone
+    
+    async def code_callback():
+        """Called by Telethon when it needs the authentication code."""
+        logger.info("Authentication code required - waiting for user input via chat")
+        login_state['waiting_for'] = 'code'
+        
+        # Send message to self (saved messages)
+        try:
+            await client.send_message('me', '🔐 **Authentication Code Required**\n\n'
+                                             'Please reply with the authentication code sent to your Telegram app.\n'
+                                             'Format: Just the code (e.g., `12345`)')
+        except Exception as e:
+            logger.error(f"Failed to send code request message: {e}")
+        
+        # Wait for code to be provided
+        code_future = asyncio.get_event_loop().create_future()
+        login_state['code_callback'] = code_future
+        
+        code = await code_future
+        login_state['waiting_for'] = None
+        login_state['code_callback'] = None
+        logger.info("Received authentication code from user")
+        return code
+    
+    async def password_callback():
+        """Called by Telethon when it needs the 2FA password."""
+        logger.info("2FA password required - waiting for user input via chat")
+        login_state['waiting_for'] = 'password'
+        
+        # Send message to self (saved messages)
+        try:
+            await client.send_message('me', '🔒 **2FA Password Required**\n\n'
+                                             'Please reply with your Two-Factor Authentication password.\n'
+                                             'Your password will be hidden from logs.')
+        except Exception as e:
+            logger.error(f"Failed to send password request message: {e}")
+        
+        # Wait for password to be provided
+        password_future = asyncio.get_event_loop().create_future()
+        login_state['password_callback'] = password_future
+        
+        password = await password_future
+        login_state['waiting_for'] = None
+        login_state['password_callback'] = None
+        logger.info("Received 2FA password from user")
+        return password
+    
+    return phone_callback, code_callback, password_callback
+
+
+async def handle_login_response(event):
+    """Handle user responses for interactive login."""
+    if not login_state['waiting_for']:
+        return False
+    
+    message_text = event.message.text.strip()
+    
+    if login_state['waiting_for'] == 'phone':
+        # Validate phone number format
+        if not message_text.startswith('+') and not message_text.isdigit():
+            await event.reply('❌ Invalid phone number format. Please use international format (e.g., +1234567890)')
+            return True
+        
+        if login_state['phone_callback'] and not login_state['phone_callback'].done():
+            login_state['phone_callback'].set_result(message_text)
+            await event.reply(f'✅ Phone number received: {message_text}\n⏳ Requesting authentication code...')
+        return True
+    
+    elif login_state['waiting_for'] == 'code':
+        # Validate code format (usually 5 digits)
+        if not message_text.isdigit():
+            await event.reply('❌ Invalid code format. Please enter only the digits.')
+            return True
+        
+        if login_state['code_callback'] and not login_state['code_callback'].done():
+            login_state['code_callback'].set_result(message_text)
+            await event.reply('✅ Code received, authenticating...')
+        return True
+    
+    elif login_state['waiting_for'] == 'password':
+        # Accept any password
+        if login_state['password_callback'] and not login_state['password_callback'].done():
+            login_state['password_callback'].set_result(message_text)
+            await event.reply('✅ Password received, authenticating...')
+            # Delete the message containing the password for security
+            try:
+                await event.delete()
+            except Exception as e:
+                logger.warning(f"Could not delete password message: {e}")
+        return True
+    
+    return False
+            except:
+                pass
+        return True
+    
+    return False
+
 
 async def save_current_processes():
     """Save current processes to file periodically to persist across restarts"""
@@ -233,6 +365,11 @@ async def watcher(event):
     try:
         msg = event.message
         text = msg.message or ''
+        
+        # Check if we're waiting for login input (phone/code/password)
+        if login_state['waiting_for'] and event.is_private:
+            await handle_login_response(event)
+            return
         
         # Handle commands
         if text.startswith('/'):
@@ -392,8 +529,32 @@ async def main_async():
     """Main async function."""
     logger.info('Starting Telegram Compressed File Extractor...')
     
+    # Initialize task variables
+    save_task = None
+    retry_task = None
+    
     try:
-        await client.start()
+        # Check if session file exists
+        session_file = 'data/session.session'
+        session_exists = os.path.exists(session_file)
+        
+        if not session_exists:
+            logger.info('No session file found. Interactive login will be required.')
+            logger.info('Please check your Telegram "Saved Messages" for login prompts.')
+            
+            # Create interactive login handlers
+            phone_callback, code_callback, password_callback = create_interactive_login_handlers()
+            
+            # Start client with interactive callbacks
+            await client.start(
+                phone=phone_callback,
+                code_callback=code_callback,
+                password=password_callback
+            )
+        else:
+            # Session exists, start normally
+            await client.start()
+        
         logger.info('Telegram client started successfully')
         
         # Ensure target entity can be resolved
@@ -413,13 +574,20 @@ async def main_async():
         
     except KeyboardInterrupt:
         logger.info('Received keyboard interrupt, shutting down...')
+    except EOFError:
+        logger.error('EOF error: No input available. Make sure the script is running in an interactive terminal.')
+        logger.error('If running in background, ensure you have already authenticated (session file exists).')
     except Exception as e:
         logger.error(f'Error in main async: {e}')
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
         # Clean up
         try:
-            save_task.cancel()
-            retry_task.cancel()
+            if save_task:
+                save_task.cancel()
+            if retry_task:
+                retry_task.cancel()
             await queue_manager.stop_all_tasks()
             logger.info('Cleanup completed')
         except Exception as e:

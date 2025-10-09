@@ -152,7 +152,7 @@ class QueueManager:
         self._restore_queues()
     
     def _restore_queues(self):
-        """Restore queues from persistent storage."""
+        """Restore queues from persistent storage with intelligent grouping."""
         # Restore download queue
         download_items_restored = 0
         for item in self.download_persistent.get_items():
@@ -162,14 +162,32 @@ class QueueManager:
             except asyncio.QueueFull:
                 logger.warning("Download queue full, skipping item")
         
-        # Restore upload queue
+        # Restore upload queue with smart regrouping
+        upload_items = list(self.upload_persistent.get_items())
         upload_items_restored = 0
-        for item in self.upload_persistent.get_items():
-            try:
-                self.upload_queue.put_nowait(item)
-                upload_items_restored += 1
-            except asyncio.QueueFull:
-                logger.warning("Upload queue full, skipping item")
+        
+        if upload_items:
+            logger.info(f"Restoring {len(upload_items)} upload tasks from persistent storage")
+            
+            # Analyze tasks for potential regrouping
+            grouped_tasks, individual_tasks = self._regroup_restored_uploads(upload_items)
+            
+            # Add grouped tasks first
+            for grouped_task in grouped_tasks:
+                try:
+                    self.upload_queue.put_nowait(grouped_task)
+                    upload_items_restored += 1
+                    logger.info(f"Restored grouped task: {grouped_task.get('filename')} with {len(grouped_task.get('file_paths', []))} files")
+                except asyncio.QueueFull:
+                    logger.warning("Upload queue full, skipping grouped task")
+            
+            # Add individual tasks that couldn't be grouped
+            for item in individual_tasks:
+                try:
+                    self.upload_queue.put_nowait(item)
+                    upload_items_restored += 1
+                except asyncio.QueueFull:
+                    logger.warning("Upload queue full, skipping item")
         
         # Store the counts for later task creation when event loop is available
         self._pending_download_items = download_items_restored
@@ -179,7 +197,131 @@ class QueueManager:
             logger.info(f"Restored {download_items_restored} download tasks, will start processor when event loop is ready")
         
         if upload_items_restored > 0:
+            original_count = len(upload_items) if upload_items else 0
+            reduction = original_count - upload_items_restored
+            if reduction > 0:
+                logger.info(f"✨ Optimized upload queue: {original_count} individual files → {upload_items_restored} tasks (grouped {reduction} files)")
             logger.info(f"Restored {upload_items_restored} upload tasks, will start processor when event loop is ready")
+    
+    def _regroup_restored_uploads(self, upload_items: list) -> tuple:
+        """Intelligently regroup individual upload items into grouped tasks.
+        
+        This function analyzes restored upload tasks and batches individual files
+        from the same archive into grouped uploads to dramatically reduce API calls.
+        
+        Returns:
+            tuple: (grouped_tasks, individual_tasks)
+                - grouped_tasks: List of tasks with is_grouped=True and multiple file_paths
+                - individual_tasks: List of tasks that should remain individual
+        """
+        from .constants import PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
+        
+        # Separate already-grouped tasks from individual tasks
+        already_grouped = []
+        individual_files = []
+        
+        for item in upload_items:
+            if item.get('is_grouped'):
+                # Already a grouped task, keep as-is
+                already_grouped.append(item)
+                logger.debug(f"Task already grouped: {item.get('filename')}")
+            else:
+                individual_files.append(item)
+        
+        if not individual_files:
+            logger.info("No individual files to regroup")
+            return (already_grouped, [])
+        
+        logger.info(f"Analyzing {len(individual_files)} individual files for regrouping")
+        
+        # Group individual files by source archive and extraction folder
+        archive_groups = {}  # key: (source_archive, extraction_folder), value: {'images': [], 'videos': []}
+        ungroupable = []
+        
+        for item in individual_files:
+            source_archive = item.get('archive_name') or item.get('source_archive')
+            extraction_folder = item.get('extraction_folder')
+            file_path = item.get('file_path')
+            
+            # Only group files that have both source_archive and extraction_folder
+            # and the file still exists on disk
+            if source_archive and extraction_folder and file_path and os.path.exists(file_path):
+                key = (source_archive, extraction_folder)
+                
+                if key not in archive_groups:
+                    archive_groups[key] = {'images': [], 'videos': [], 'items': []}
+                
+                # Determine file type
+                file_ext = os.path.splitext(file_path)[1].lower()
+                if file_ext in PHOTO_EXTENSIONS:
+                    archive_groups[key]['images'].append(file_path)
+                elif file_ext in VIDEO_EXTENSIONS:
+                    archive_groups[key]['videos'].append(file_path)
+                
+                # Store the original item for reference
+                archive_groups[key]['items'].append(item)
+            else:
+                # Can't group this file - missing metadata or file doesn't exist
+                if file_path and not os.path.exists(file_path):
+                    logger.warning(f"Skipping missing file from queue: {file_path}")
+                else:
+                    ungroupable.append(item)
+                    logger.debug(f"Cannot group file (missing metadata): {item.get('filename')}")
+        
+        # Create grouped tasks from the archive groups
+        new_grouped_tasks = []
+        
+        for (source_archive, extraction_folder), files_data in archive_groups.items():
+            images = files_data['images']
+            videos = files_data['videos']
+            original_items = files_data['items']
+            
+            # Only create groups if we have multiple files of the same type
+            # Otherwise keep as individual tasks
+            if len(images) >= 2:
+                # Create grouped image task
+                grouped_task = {
+                    'type': 'grouped_media',
+                    'media_type': 'images',
+                    'event': None,  # Restored tasks have no event
+                    'file_paths': images,
+                    'filename': f"{source_archive} - Images ({len(images)} files)",
+                    'source_archive': source_archive,
+                    'extraction_folder': extraction_folder,
+                    'is_grouped': True,
+                    'retry_count': 0
+                }
+                new_grouped_tasks.append(grouped_task)
+                logger.info(f"📦 Created grouped task: {len(images)} images from {source_archive}")
+            elif len(images) == 1:
+                # Single image - keep as individual
+                ungroupable.extend([item for item in original_items if item.get('file_path') in images])
+            
+            if len(videos) >= 2:
+                # Create grouped video task
+                grouped_task = {
+                    'type': 'grouped_media',
+                    'media_type': 'videos',
+                    'event': None,  # Restored tasks have no event
+                    'file_paths': videos,
+                    'filename': f"{source_archive} - Videos ({len(videos)} files)",
+                    'source_archive': source_archive,
+                    'extraction_folder': extraction_folder,
+                    'is_grouped': True,
+                    'retry_count': 0
+                }
+                new_grouped_tasks.append(grouped_task)
+                logger.info(f"📦 Created grouped task: {len(videos)} videos from {source_archive}")
+            elif len(videos) == 1:
+                # Single video - keep as individual
+                ungroupable.extend([item for item in original_items if item.get('file_path') in videos])
+        
+        # Combine all grouped tasks
+        all_grouped = already_grouped + new_grouped_tasks
+        
+        logger.info(f"Regrouping complete: {len(new_grouped_tasks)} new groups created, {len(ungroupable)} individual tasks remain")
+        
+        return (all_grouped, ungroupable)
     
     async def ensure_processors_started(self):
         """Ensure processing tasks are started for restored items. Call this when event loop is running."""
@@ -272,22 +414,32 @@ class QueueManager:
                 continue
     
     async def _process_upload_queue(self):
-        """Process upload queue with concurrency control."""
+        """Process upload queue with concurrency control and robust FloodWait handling."""
         logger.info("Starting upload queue processor")
         
         while True:
             try:
+                logger.info(f"Upload processor waiting for tasks. Current queue size: {self.upload_queue.qsize()}")
+                
                 # Get next upload task
                 task = await self.upload_queue.get()
                 
+                filename = task.get('filename', 'unknown')
+                logger.info(f"Upload processor got task: {filename}")
+                
                 # Remove from persistent storage
                 self.upload_persistent.remove_item(task)
+                logger.info(f"Removed {filename} from persistent storage")
                 
                 # Process with semaphore
+                logger.info(f"Acquiring upload semaphore for {filename}")
                 async with self.upload_semaphore:
+                    logger.info(f"Executing upload task for {filename}")
                     await self._execute_upload_task(task)
+                    logger.info(f"Completed upload task for {filename}")
                 
                 self.upload_queue.task_done()
+                logger.info(f"Marked upload task done for {filename}. Remaining queue size: {self.upload_queue.qsize()}")
                 
             except asyncio.CancelledError:
                 logger.info("Upload queue processor cancelled")
@@ -298,11 +450,17 @@ class QueueManager:
                 wait_seconds = e.seconds if hasattr(e, 'seconds') else 60
                 logger.error(f"Uncaught FloodWaitError in upload queue processor: Telegram requires waiting {wait_seconds} seconds")
                 logger.info("Upload queue processor will continue with next task. Failed task has been queued for retry.")
+                
+                # Mark the current task as done so we can continue
+                self.upload_queue.task_done()
                 continue
             except Exception as e:
                 logger.error(f"Error in upload queue processor: {e}")
                 import traceback
                 logger.error(f"Full traceback: {traceback.format_exc()}")
+                
+                # Mark task as done and continue with next task
+                self.upload_queue.task_done()
                 continue
     
     async def _execute_download_task(self, task: dict):
@@ -628,14 +786,15 @@ class QueueManager:
             wait_seconds = e.seconds if hasattr(e, 'seconds') else 60
             retry_count = task.get('retry_count', 0) + 1
             
-            logger.warning(f"FloodWaitError for {filename}: Telegram requires waiting {wait_seconds} seconds (attempt {retry_count})")
-            logger.info(f"This is a rate limit from Telegram. The bot will automatically retry after the required wait time.")
+            logger.warning(f"⏳ FloodWaitError for {filename}: Telegram requires waiting {wait_seconds} seconds (attempt {retry_count})")
+            logger.info(f"📊 This is a rate limit from Telegram. The bot will automatically retry after the required wait time.")
+            logger.info(f"💡 Upload processor will continue with other tasks in the queue while waiting.")
             
             # Always retry on FloodWaitError regardless of retry count
             # Use Telegram's required wait time + 5 second buffer
             retry_delay = wait_seconds + 5
             
-            logger.info(f"Scheduling upload retry for {filename} in {retry_delay}s (Telegram rate limit)")
+            logger.info(f"⏰ Scheduling upload retry for {filename} in {retry_delay}s (Telegram rate limit)")
             
             # Add to retry queue with Telegram's wait time
             retry_task = task.copy()
@@ -660,14 +819,21 @@ class QueueManager:
                 if seconds > 0 or not time_str:
                     time_str += f"{seconds}s"
                 
-                await event.reply(
-                    f'⏳ Telegram rate limit: {filename}\n'
-                    f'Required wait: {time_str.strip()}\n'
-                    f'Auto-retry scheduled. Your file will be uploaded automatically.'
-                )
+                try:
+                    await event.reply(
+                        f'⏳ Telegram rate limit: {filename}\n'
+                        f'Required wait: {time_str.strip()}\n'
+                        f'Auto-retry scheduled. Your file will be uploaded automatically.'
+                    )
+                    logger.info(f"✉️ Sent rate limit notification to user for {filename}")
+                except Exception as reply_e:
+                    logger.warning(f"Could not send rate limit notification for {filename}: {reply_e}")
+            else:
+                logger.info(f"📝 No event available for user notification (background task): {filename}")
             
             # Keep file for retry - NEVER delete on FloodWaitError
-            logger.info(f"Keeping file for retry after rate limit: {file_path}")
+            logger.info(f"💾 Keeping file for retry after rate limit: {file_path}")
+            logger.info(f"🔄 Upload processor continuing with next task in queue...")
             
         except Exception as e:
             retry_count = task.get('retry_count', 0) + 1
@@ -840,13 +1006,15 @@ class QueueManager:
             wait_seconds = e.seconds if hasattr(e, 'seconds') else 60
             retry_count = task.get('retry_count', 0) + 1
             
-            logger.warning(f"FloodWaitError for grouped upload {filename}: Telegram requires waiting {wait_seconds} seconds (attempt {retry_count})")
-            logger.info(f"This is a rate limit from Telegram. The bot will automatically retry after the required wait time.")
+            logger.warning(f"⏳ FloodWaitError for grouped upload {filename}: Telegram requires waiting {wait_seconds} seconds (attempt {retry_count})")
+            logger.info(f"📊 This is a rate limit from Telegram. The bot will automatically retry after the required wait time.")
+            logger.info(f"💡 Upload processor will continue with other tasks in the queue while waiting.")
+            logger.info(f"📦 Grouped upload includes {len(existing_files)} files that will be preserved for retry")
             
             # Use Telegram's required wait time + 5 second buffer
             retry_delay = wait_seconds + 5
             
-            logger.info(f"Scheduling grouped upload retry for {filename} in {retry_delay}s (Telegram rate limit)")
+            logger.info(f"⏰ Scheduling grouped upload retry for {filename} in {retry_delay}s (Telegram rate limit)")
             
             # Add to retry queue with Telegram's wait time
             retry_task = task.copy()
@@ -871,14 +1039,21 @@ class QueueManager:
                 if seconds > 0 or not time_str:
                     time_str += f"{seconds}s"
                 
-                await event.reply(
-                    f'⏳ Telegram rate limit: {filename}\n'
-                    f'Required wait: {time_str.strip()}\n'
-                    f'Auto-retry scheduled. Your files will be uploaded automatically.'
-                )
+                try:
+                    await event.reply(
+                        f'⏳ Telegram rate limit: {filename}\n'
+                        f'Required wait: {time_str.strip()}\n'
+                        f'Auto-retry scheduled. Your files will be uploaded automatically.'
+                    )
+                    logger.info(f"✉️ Sent rate limit notification to user for grouped upload {filename}")
+                except Exception as reply_e:
+                    logger.warning(f"Could not send rate limit notification for {filename}: {reply_e}")
+            else:
+                logger.info(f"📝 No event available for user notification (background task): {filename}")
             
             # Keep files for retry - do NOT delete
-            logger.info(f"Keeping {len(existing_files)} files for retry after rate limit")
+            logger.info(f"💾 Keeping {len(existing_files)} files for retry after rate limit")
+            logger.info(f"🔄 Upload processor continuing with next task in queue...")
             
         except Exception as e:
             retry_count = task.get('retry_count', 0) + 1

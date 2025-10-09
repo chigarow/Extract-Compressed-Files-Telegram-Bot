@@ -159,10 +159,13 @@ async def download_from_torbox(
     chunk_size: int = 256 * 1024,  # 256 KB chunks for stability
     api_key: Optional[str] = None,
     max_retries: int = 5,
-    retry_delay: int = 5
+    retry_delay: int = 10  # Increased from 5s to 10s
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
-    Download a file from Torbox CDN link with retry mechanism.
+    Download a file from Torbox CDN link with retry mechanism and resume capability.
+    
+    Uses HTTP Range requests to resume interrupted downloads from the last successful byte,
+    preventing the need to restart large downloads from scratch.
     
     Args:
         url: The Torbox CDN download URL
@@ -171,19 +174,28 @@ async def download_from_torbox(
         chunk_size: Size of chunks to download (default 256KB for better stability)
         api_key: Optional Torbox API key for retrieving file metadata
         max_retries: Maximum number of retry attempts (default 5)
-        retry_delay: Initial delay between retries in seconds (default 5)
+        retry_delay: Initial delay between retries in seconds (default 10)
         
     Returns:
         Tuple of (success: bool, error_message: Optional[str], actual_filename: Optional[str])
     """
     actual_filename = None
     retry_count = 0
+    part_file_path = output_path + ".part"  # Temporary file for partial downloads
     
     while retry_count <= max_retries:
         try:
+            # Check if we have a partial download to resume from
+            resume_from = 0
+            if os.path.exists(part_file_path):
+                resume_from = os.path.getsize(part_file_path)
+                logger.info(f"Found partial download: {human_size(resume_from)}, will attempt to resume")
+            
             if retry_count > 0:
-                delay = retry_delay * (2 ** (retry_count - 1))  # Exponential backoff
+                delay = retry_delay * (2 ** (retry_count - 1))  # Exponential backoff: 10s, 20s, 40s, 80s, 160s
                 logger.info(f"Retry {retry_count}/{max_retries} for Torbox download after {delay}s delay: {url}")
+                if resume_from > 0:
+                    logger.info(f"Will resume from byte {resume_from}")
                 await asyncio.sleep(delay)
             else:
                 logger.info(f"Starting Torbox download: {url}")
@@ -229,15 +241,47 @@ async def download_from_torbox(
             )
             
             async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-                # Make GET request
-                async with session.get(url) as response:
-                    if response.status != 200:
+                # Prepare headers for resume support
+                headers = {}
+                if resume_from > 0:
+                    headers['Range'] = f'bytes={resume_from}-'
+                    logger.info(f"Requesting Range: bytes={resume_from}-")
+                
+                # Make GET request with Range header if resuming
+                async with session.get(url, headers=headers) as response:
+                    # Accept 200 (full content) or 206 (partial content)
+                    if response.status not in (200, 206):
                         error_msg = f"HTTP {response.status}: {response.reason}"
                         logger.error(f"Torbox download failed: {error_msg}")
+                        # If range request failed, try without range
+                        if response.status == 416 and resume_from > 0:
+                            logger.warning("Range request not supported or invalid, removing partial file")
+                            if os.path.exists(part_file_path):
+                                os.remove(part_file_path)
+                            resume_from = 0
+                            continue  # Retry without range
                         return False, error_msg, None
                     
                     # Get total file size
-                    total_size = int(response.headers.get('content-length', 0))
+                    if response.status == 206:
+                        # Partial content - parse Content-Range header
+                        content_range = response.headers.get('content-range', '')
+                        if content_range:
+                            # Format: bytes start-end/total
+                            total_size = int(content_range.split('/')[-1])
+                            logger.info(f"Resuming download, total size: {human_size(total_size)}")
+                        else:
+                            total_size = int(response.headers.get('content-length', 0)) + resume_from
+                    else:
+                        # Full content
+                        total_size = int(response.headers.get('content-length', 0))
+                        # If we expected to resume but got 200, server doesn't support ranges
+                        if resume_from > 0:
+                            logger.warning("Server returned full content instead of range, restarting download")
+                            if os.path.exists(part_file_path):
+                                os.remove(part_file_path)
+                            resume_from = 0
+                    
                     logger.info(f"Torbox file size: {human_size(total_size)}")
                     
                     # Get filename from Content-Disposition header if not from API
@@ -257,11 +301,13 @@ async def download_from_torbox(
                         logger.info(f"Saving to: {output_path}")
                     
                     # Download file in chunks
-                    downloaded = 0
+                    downloaded = resume_from  # Start from resume position
                     start_time = time.time()
                     last_progress_time = start_time
                     
-                    with open(output_path, 'wb') as f:
+                    # Open in append mode if resuming, write mode if starting fresh
+                    file_mode = 'ab' if resume_from > 0 else 'wb'
+                    with open(part_file_path, file_mode) as f:
                         async for chunk in response.content.iter_chunked(chunk_size):
                             if chunk:
                                 f.write(chunk)
@@ -283,19 +329,25 @@ async def download_from_torbox(
                                     last_progress_time = now
                 
                     # Verify download
-                    actual_size = os.path.getsize(output_path)
+                    actual_size = os.path.getsize(part_file_path)
                     elapsed = time.time() - start_time
-                    avg_speed = actual_size / elapsed if elapsed > 0 else 0
+                    avg_speed = (actual_size - resume_from) / elapsed if elapsed > 0 else 0
                     
-                    logger.info(f"Torbox download completed: {output_path}")
+                    logger.info(f"Torbox download completed: {part_file_path}")
                     logger.info(f"Downloaded {human_size(actual_size)} in {elapsed:.1f}s ({human_size(avg_speed)}/s)")
                     
                     if total_size > 0 and actual_size != total_size:
-                        error_msg = f"Download incomplete: {actual_size}/{total_size} bytes"
+                        error_msg = f"Download incomplete: {actual_size}/{total_size} bytes (missing {total_size - actual_size} bytes)"
                         logger.warning(f"Size mismatch on attempt {retry_count + 1}: expected {total_size}, got {actual_size}")
-                        raise aiohttp.ClientError(error_msg)  # Trigger retry
+                        logger.warning(f"Keeping partial file for resume: {part_file_path}")
+                        raise aiohttp.ClientPayloadError(error_msg)  # Trigger retry with specific error type
                     
-                    # Success!
+                    # Success! Move .part file to final destination
+                    if os.path.exists(output_path):
+                        os.remove(output_path)  # Remove any old file
+                    os.rename(part_file_path, output_path)
+                    logger.info(f"Download successful, renamed {part_file_path} to {output_path}")
+                    
                     return True, None, actual_filename or os.path.basename(output_path)
                     
         except (asyncio.TimeoutError, aiohttp.ClientError, ConnectionError) as e:
@@ -304,24 +356,52 @@ async def download_from_torbox(
             error_type = type(e).__name__
             error_msg = str(e)
             
+            # Check current download progress
+            current_size = 0
+            if os.path.exists(part_file_path):
+                current_size = os.path.getsize(part_file_path)
+            
             if retry_count <= max_retries:
                 logger.warning(f"Torbox download {error_type} (attempt {retry_count}/{max_retries}): {error_msg}")
-                # Clean up partial download
+                if current_size > 0:
+                    logger.warning(f"Partial download saved: {human_size(current_size)} - will attempt resume")
+                else:
+                    logger.warning("No partial download data - will restart from beginning")
+                
+                # DO NOT clean up .part file - we want to resume from it!
+                # Only clean up the final output file if it exists
                 if os.path.exists(output_path):
                     try:
                         os.remove(output_path)
-                        logger.info(f"Cleaned up partial download: {output_path}")
+                        logger.info(f"Cleaned up old final file: {output_path}")
                     except Exception:
                         pass
-                continue  # Retry
+                continue  # Retry (will resume from .part file)
             else:
                 logger.error(f"Torbox download failed after {max_retries} retries: {error_msg}")
+                if current_size > 0:
+                    logger.error(f"Partial download remains at: {part_file_path} ({human_size(current_size)})")
+                    logger.error("You may manually retry or remove the .part file")
+                # Clean up .part file on final failure
+                if os.path.exists(part_file_path):
+                    try:
+                        os.remove(part_file_path)
+                        logger.info(f"Cleaned up partial download after final failure: {part_file_path}")
+                    except Exception as cleanup_err:
+                        logger.warning(f"Could not clean up .part file: {cleanup_err}")
                 return False, f"{error_type} after {max_retries} retries: {error_msg}", actual_filename
                 
         except OSError as e:
             # File system errors are not retriable
             error_msg = f"File system error: {str(e)}"
             logger.error(f"Torbox download file system error: {error_msg}")
+            # Clean up .part file on file system error
+            if os.path.exists(part_file_path):
+                try:
+                    os.remove(part_file_path)
+                    logger.info(f"Cleaned up partial download after file system error: {part_file_path}")
+                except Exception:
+                    pass
             return False, error_msg, actual_filename
             
         except Exception as e:
@@ -330,9 +410,23 @@ async def download_from_torbox(
             logger.error(f"Torbox download unexpected error: {error_msg}")
             import traceback
             logger.error(traceback.format_exc())
+            # Clean up .part file on unexpected error
+            if os.path.exists(part_file_path):
+                try:
+                    os.remove(part_file_path)
+                    logger.info(f"Cleaned up partial download after unexpected error: {part_file_path}")
+                except Exception:
+                    pass
             return False, error_msg, actual_filename
     
     # Should not reach here, but just in case
+    # Clean up .part file if we somehow exit the loop
+    if os.path.exists(part_file_path):
+        try:
+            os.remove(part_file_path)
+            logger.info(f"Cleaned up partial download after max retries: {part_file_path}")
+        except Exception:
+            pass
     return False, f"Download failed after {max_retries} retries", actual_filename
 
 

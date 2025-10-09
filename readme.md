@@ -212,22 +212,48 @@ The script now includes comprehensive support for various video formats:
 
 ### Grouped Media Uploads and Rate Limit Handling
 
-The script features intelligent grouped media uploads that dramatically reduce Telegram rate limiting:
+The script features intelligent grouped media uploads that dramatically reduce Telegram rate limiting while respecting Telegram's 10-file album limit:
 
 **Grouped Upload Benefits:**
-- **Massive API Call Reduction**: 100 files = 2 API calls instead of 100 (97-99% reduction)
-- **Better Organization**: Files grouped as albums by type (images/videos) instead of spam
+- **Massive API Call Reduction**: 100 files = 10 API calls instead of 100 (90% reduction)
+- **Telegram-Compliant Batching**: Automatically splits large groups into 10-file batches
+- **Better Organization**: Files grouped as albums by type (images/videos) with proper labeling
 - **Rate Limit Prevention**: Significantly fewer API calls means much lower chance of hitting limits
-- **Source Attribution**: Each album includes the archive name in the caption
+- **Source Attribution**: Each album includes the archive name and batch info in the caption
+
+**10-File Album Limit (NEW)**:
+Per Telegram's official limits ([limits.tginfo.me](https://limits.tginfo.me/en)), albums can contain maximum 10 media files. The bot automatically handles this:
+
+- **Automatic Batching**: Large groups split into 10-file chunks
+- **Smart Labeling**: "Archive.zip - Images (Batch 1/273: 10 files)"
+- **Triple Validation**: Batching at queue restoration, live extraction, and upload execution
+- **Seamless Experience**: Works transparently, no configuration needed
 
 **How It Works:**
 ```
-Extract Archive (100 images + 20 videos)
+Extract Archive (2726 images + 20 videos)
     ↓
-Batch by Type
-    ├── Images (100 files) → Upload as 1 album message
-    └── Videos (20 files) → Upload as 1 album message
-Result: 2 API calls instead of 120 (98% reduction)
+Batch by Type and Limit
+    ├── Images (2726 files)
+    │   ├── Batch 1/273: 10 images → Upload as album
+    │   ├── Batch 2/273: 10 images → Upload as album
+    │   ├── ...
+    │   └── Batch 273/273: 6 images → Upload as album
+    └── Videos (20 files)
+        ├── Batch 1/2: 10 videos → Upload as album
+        └── Batch 2/2: 10 videos → Upload as album
+Result: 275 API calls instead of 2746 (90% reduction, Telegram-compliant)
+```
+
+**Example: Large Archive**
+```
+User: Sends PrincessAlura.zip (2726 images)
+Bot: "📦 Extracting PrincessAlura.zip..."
+Bot: "📊 Splitting 2726 images into batches of 10"
+Bot: "📤 Uploading Batch 1/273: 10 files"
+...
+Bot: "📤 Uploading Batch 273/273: 6 files"
+Bot: "✅ Uploaded 2726 images in 273 batches"
 ```
 
 **Rate Limit Handling:**
@@ -542,6 +568,56 @@ Bot: "✅ Uploaded archive1.zip - Images (100 files)"
 5. **Production Safety**: Tested with 7 comprehensive unit tests
 
 ## Recent Updates (October 2025)
+
+### Telegram 10-File Album Limit Compliance ✨ **NEW**
+
+**Problem Solved**: Bot attempted to upload 2726 files as single album, violating Telegram's documented 10-file limit.
+
+**Automatic Batching Implementation**: Ensures all uploads comply with Telegram's album restrictions:
+
+- **Telegram Limit**: Maximum 10 media files per album (per [limits.tginfo.me](https://limits.tginfo.me/en))
+- **Intelligent Batching**: Large groups automatically split into 10-file batches
+- **Triple Validation**: Batching at queue restoration, live extraction, and upload execution
+- **Clear Labeling**: "Archive.zip - Images (Batch 1/273: 10 files)"
+- **Metadata Preservation**: Batch info tracked for proper cleanup and status reporting
+
+**Impact Analysis:**
+
+| Scenario | Files | Before | After | Compliance |
+|----------|-------|--------|-------|------------|
+| Small archive (8 images) | 8 | 1 album | 1 album | ✅ Within limit |
+| Medium archive (25 images) | 25 | **1 album** ❌ | 3 batches | ✅ Compliant |
+| Large archive (2726 images) | 2726 | **1 album** ❌ | 273 batches | ✅ Compliant |
+
+**Example After Extraction:**
+```
+User: Sends PrincessAlura.zip (2726 images + 35 videos)
+Bot: "📦 Extracting PrincessAlura.zip..."
+Bot: "📊 Splitting 2726 images into batches of 10"
+Bot: "📤 Uploading Batch 1/273: 10 files"
+Bot: "📤 Uploading Batch 2/273: 10 files"
+...
+Bot: "📤 Uploading Batch 273/273: 6 files"
+Bot: "📊 Splitting 35 videos into batches of 10"
+Bot: "📤 Uploading Batch 1/4: 10 files"
+...
+Bot: "📤 Uploading Batch 4/4: 5 files"
+Bot: "✅ Uploaded 2726 images in 273 batches"
+Bot: "✅ Uploaded 35 videos in 4 batches"
+```
+
+**Technical Details:**
+- Constant: `TELEGRAM_ALBUM_MAX_FILES = 10`
+- Batching Logic: Splits at queue restoration, live extraction, and upload execution
+- Batch Math: `total_batches = ceil(file_count / 10)`
+- Labeling Format: `{archive} - {type} (Batch {num}/{total}: {count} files)`
+
+**Benefits:**
+1. **Compliance**: All uploads respect Telegram's documented limits
+2. **No Silent Failures**: Previously invalid 2700+ file albums now upload successfully
+3. **Clear Progress**: Users see exactly which batch is uploading
+4. **Crash Recovery**: Batches preserved and restored properly after restarts
+5. **Production Safe**: Comprehensive test suite (13 tests, all passing)
 
 ### Grouped Media Upload and FloodWaitError Handling ✨ **ENHANCED**
 

@@ -23,6 +23,51 @@ except NameError:  # noqa: F821
 logger = logging.getLogger('extractor')
 
 
+class ExtractionCleanupRegistry:
+    """Track extraction folders that need cleanup after all files are uploaded."""
+    
+    def __init__(self):
+        self.registry = {}  # extraction_folder -> {'total': int, 'uploaded': int}
+        self.lock = asyncio.Lock()
+    
+    async def register_extraction(self, extraction_folder: str, total_files: int):
+        """Register a new extraction folder with the number of files to upload."""
+        async with self.lock:
+            self.registry[extraction_folder] = {'total': total_files, 'uploaded': 0}
+            logger.info(f"Registered extraction folder for cleanup: {extraction_folder} ({total_files} files)")
+    
+    async def mark_file_uploaded(self, extraction_folder: str) -> bool:
+        """Mark a file as uploaded. Returns True if this was the last file."""
+        async with self.lock:
+            if extraction_folder not in self.registry:
+                return False
+            
+            self.registry[extraction_folder]['uploaded'] += 1
+            uploaded = self.registry[extraction_folder]['uploaded']
+            total = self.registry[extraction_folder]['total']
+            
+            logger.info(f"Upload progress for {extraction_folder}: {uploaded}/{total} files")
+            
+            if uploaded >= total:
+                # All files uploaded, remove from registry
+                del self.registry[extraction_folder]
+                return True
+            
+            return False
+    
+    async def cleanup_folder(self, extraction_folder: str):
+        """Clean up an extraction folder."""
+        try:
+            if os.path.exists(extraction_folder):
+                import shutil
+                shutil.rmtree(extraction_folder, ignore_errors=True)
+                logger.info(f"✅ Cleaned up extraction folder: {extraction_folder}")
+            else:
+                logger.warning(f"Extraction folder already removed: {extraction_folder}")
+        except Exception as e:
+            logger.error(f"Failed to clean up extraction folder {extraction_folder}: {e}")
+
+
 class QueueManager:
     """Manages download and upload queues with persistent storage and concurrency control.
 
@@ -37,6 +82,9 @@ class QueueManager:
         self.retry_queue = []  # legacy structure used in some tests
         self.client = client  # optional injected client for tests
         self.is_processing = False  # legacy flag used by tests
+        
+        # Add extraction cleanup registry
+        self.extraction_cleanup_registry = ExtractionCleanupRegistry()
 
         # Provide list-like append for legacy tests manipulating internal queue directly
         def _append_download(item):  # pragma: no cover
@@ -512,6 +560,14 @@ class QueueManager:
             except Exception as e:
                 logger.warning(f"Failed to clean up file {file_path}: {e}")
             
+            # Check if we should clean up extraction folder
+            extraction_folder = task.get('extraction_folder')
+            if extraction_folder:
+                is_last_file = await self.extraction_cleanup_registry.mark_file_uploaded(extraction_folder)
+                if is_last_file:
+                    logger.info(f"All files uploaded from {extraction_folder}, cleaning up folder...")
+                    await self.extraction_cleanup_registry.cleanup_folder(extraction_folder)
+            
         except Exception as e:
             retry_count = task.get('retry_count', 0) + 1
             logger.error(f"Upload failed for {filename} (attempt {retry_count}): {e}")
@@ -872,15 +928,51 @@ class QueueManager:
         logger.info(f"Starting extraction and upload processing for {filename}")
         
         try:
-            # Extract the archive
-            from .file_operations import extract_archive
-            extracted_files = await extract_archive(temp_archive_path)
+            # Create extraction directory
+            import time
+            extract_path = os.path.join(os.path.dirname(temp_archive_path), f'extracted_{filename}_{int(time.time())}')
+            os.makedirs(extract_path, exist_ok=True)
+            logger.info(f"Created extraction directory: {extract_path}")
             
-            if not extracted_files:
-                logger.error(f"No files extracted from {filename}")
+            # Extract the archive using extract_archive_async
+            from .file_operations import extract_archive_async
+            loop = asyncio.get_event_loop()
+            success, error_msg = await loop.run_in_executor(None, extract_archive_async, temp_archive_path, extract_path, filename)
+            
+            if not success:
+                logger.error(f"Extraction failed for {filename}: {error_msg}")
+                # Clean up extraction directory on failure
+                try:
+                    import shutil
+                    shutil.rmtree(extract_path, ignore_errors=True)
+                except Exception:
+                    pass
                 return
             
-            logger.info(f"Extracted {len(extracted_files)} files from {filename}")
+            # Find extracted media files
+            from .constants import MEDIA_EXTENSIONS
+            extracted_files = []
+            for root, dirs, files in os.walk(extract_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    file_ext = os.path.splitext(file)[1].lower()
+                    if file_ext in MEDIA_EXTENSIONS:
+                        extracted_files.append(file_path)
+            
+            if not extracted_files:
+                logger.warning(f"No media files extracted from {filename}")
+                # Clean up extraction directory if no media files
+                try:
+                    import shutil
+                    shutil.rmtree(extract_path, ignore_errors=True)
+                except Exception:
+                    pass
+                return
+            
+            logger.info(f"Extracted {len(extracted_files)} media files from {filename}")
+            
+            # Register extraction folder for cleanup tracking
+            await self.extraction_cleanup_registry.register_extraction(extract_path, len(extracted_files))
             
             # Add extracted files to upload queue
             for extracted_file in extracted_files:
@@ -890,7 +982,8 @@ class QueueManager:
                     'file_path': extracted_file,
                     'filename': os.path.basename(extracted_file),
                     'size_bytes': os.path.getsize(extracted_file) if os.path.exists(extracted_file) else 0,
-                    'source_archive': filename
+                    'source_archive': filename,
+                    'extraction_folder': extract_path  # Track extraction folder for cleanup
                 }
                 
                 await self.add_upload_task(upload_task)
@@ -905,6 +998,8 @@ class QueueManager:
                 
         except Exception as e:
             logger.error(f"Error processing extraction for {filename}: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
 
     async def _process_direct_media_upload(self, upload_task):
         """Process direct media compression and upload asynchronously"""

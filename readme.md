@@ -6,7 +6,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 
 - **Interactive Chat-Based Authentication**: First-time login is handled through Telegram's "Saved Messages" chat, eliminating the need for terminal input. Perfect for background processes and non-interactive environments. See [INTERACTIVE_LOGIN.md](INTERACTIVE_LOGIN.md) for details.
 - **User Account Based Access**: Uses a user account (not a bot token) for authentication, controlled by specifying a target username in the configuration.
-- **Automatic Extraction**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz.
+- **Automatic Extraction**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz. Uses multiple extraction methods with intelligent fallback for maximum compatibility across different platforms.
 - **Torbox CDN Downloads**: Automatically detects and downloads files from Torbox CDN links sent in text messages.
 - **Direct Media Upload**: Send images/videos directly to the user account and they will be re-uploaded to the target user as media in the Media tab.
 - **Media Filtering**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm, and many others).
@@ -34,9 +34,18 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 ## Prerequisites
 
 - Python 3.7+
-- Required system tools: `7z` (p7zip) for password-protected archives, `unrar` for RAR files, `ffmpeg` and `ffprobe` for video processing
 - A Telegram account with API credentials
 - **Recommended**: `cryptg` package for optimal FastTelethon performance (`pip install cryptg`)
+
+### Optional System Tools for Advanced Features
+
+The script includes intelligent fallback mechanisms and will work with just Python's built-in libraries for most common formats. However, these tools provide additional functionality:
+
+- **`7z` (p7zip)**: For password-protected archives and some advanced compression formats
+- **`unrar`**: For RAR file extraction (RAR5 format especially)
+- **`ffmpeg` and `ffprobe`**: For video processing and transcoding features
+
+**Note for Termux/Android users**: The script is optimized to work even if these system tools are not available. ZIP and TAR files will be extracted using Python's built-in `zipfile` and `tarfile` modules.
 
 ## Setup
 
@@ -692,6 +701,15 @@ ExtractCompressedFiles/
 ```
 
 ## Recent Improvements
+
+### Archive Extraction Enhancement (October 2025)
+- **Fixed critical extraction logic bug**: Resolved issue where ZIP files failed to extract on systems with limited 'file' command support (common in Termux/Android)
+- **Intelligent fallback system**: Now tries multiple extraction methods automatically (patoolib → zipfile → tarfile → unrar → 7z)
+- **Enhanced logging**: Comprehensive diagnostic information for debugging extraction issues
+- **Better error handling**: Specific exception handling for different archive formats and failure modes
+- **Validation improvements**: Upfront file validation and archive integrity checks
+- **Timeout protection**: Added 5-minute timeout for extraction operations to prevent hanging
+- **Platform optimization**: Works reliably on minimal installations without requiring all system tools
 
 ### Upload Task Error Fixes (September 2025)
 - **Fixed 'NoneType' object has no attribute 'edit' errors**: Upload tasks now properly handle null message objects when processing background tasks or restored queue items

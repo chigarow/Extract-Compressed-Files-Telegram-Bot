@@ -70,69 +70,178 @@ def extract_archive_async(temp_archive_path, extract_path, filename):
     """
     Extract archive synchronously (to be run in executor).
     Returns tuple: (success: bool, error_msg: str or None)
+    
+    This function tries multiple extraction methods in order:
+    1. patoolib (if 'file' command supports --mime-type)
+    2. Format-specific Python libraries (zipfile, tarfile)
+    3. Command-line tools (unrar, 7z)
+    
+    The function is robust and will try all available methods before giving up.
     """
+    logger.info(f'Starting extraction of {filename} from {temp_archive_path}')
+    logger.info(f'Target extraction directory: {extract_path}')
+    
+    # Validate that archive file exists and is readable
+    if not os.path.exists(temp_archive_path):
+        error_msg = f'Archive file does not exist: {temp_archive_path}'
+        logger.error(error_msg)
+        return False, error_msg
+    
+    if not os.path.isfile(temp_archive_path):
+        error_msg = f'Archive path is not a file: {temp_archive_path}'
+        logger.error(error_msg)
+        return False, error_msg
+    
+    file_size = os.path.getsize(temp_archive_path)
+    logger.info(f'Archive file size: {file_size} bytes')
+    
+    # Track which methods we try
+    attempted_methods = []
+    
+    # Try patoolib first (only if file command is compatible)
     try:
-        # First try patoolib for general extraction
         import patoolib
         if check_file_command_supports_mime():
+            logger.info('Attempting extraction with patoolib')
+            attempted_methods.append('patoolib')
             patoolib.extract_archive(temp_archive_path, outdir=extract_path, verbosity=-1)
-            logger.info(f'Archive extracted successfully using patoolib: {filename}')
+            logger.info(f'✓ Archive extracted successfully using patoolib: {filename}')
             return True, None
         else:
-            logger.warning("patoolib might fail due to 'file' command incompatibility")
+            logger.warning("Skipping patoolib: 'file' command incompatibility detected")
+            logger.info("Will try alternative extraction methods")
     except Exception as patoo_err:
-        logger.info(f'patoolib extraction failed, trying alternatives: {patoo_err}')
-        
-        # Try format-specific extractors
-        try:
-            if filename.lower().endswith('.zip'):
-                import zipfile
-                with zipfile.ZipFile(temp_archive_path, 'r') as zip_ref:
-                    zip_ref.extractall(extract_path)
-                logger.info(f'ZIP archive extracted using zipfile: {filename}')
-                return True, None
-            elif filename.lower().endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2')):
-                import tarfile
-                with tarfile.open(temp_archive_path, 'r:*') as tar_ref:
-                    tar_ref.extractall(extract_path)
-                logger.info(f'TAR archive extracted using tarfile: {filename}')
-                return True, None
-            elif filename.lower().endswith('.rar'):
-                # Try unrar command
-                unrar = shutil.which('unrar')
-                if unrar:
-                    result = subprocess.run([unrar, 'x', '-y', temp_archive_path, extract_path], 
-                                          capture_output=True, text=True)
-                    if result.returncode == 0:
-                        logger.info(f'RAR archive extracted using unrar: {filename}')
-                        return True, None
-                    else:
-                        logger.error(f'unrar failed: {result.stderr}')
-                        return False, f'unrar failed: {result.stderr}'
-                else:
-                    logger.error('unrar not found for RAR extraction')
-                    return False, 'unrar not found for RAR extraction'
-            else:
-                # Try 7z as last resort
-                sevenzip = shutil.which('7z') or shutil.which('7za')
-                if sevenzip:
-                    result = subprocess.run([sevenzip, 'x', '-y', f'-o{extract_path}', temp_archive_path], 
-                                          capture_output=True, text=True)
-                    if result.returncode == 0:
-                        logger.info(f'Archive extracted using 7z: {filename}')
-                        return True, None
-                    else:
-                        logger.error(f'7z extraction failed: {result.stderr}')
-                        return False, f'7z extraction failed: {result.stderr}'
-                else:
-                    logger.error('No suitable extraction tool found')
-                    return False, 'No suitable extraction tool found'
-        except Exception as e:
-            logger.error(f'All extraction methods failed: {e}')
-            return False, f'All extraction methods failed: {e}'
+        logger.warning(f'patoolib extraction failed: {patoo_err}')
+        logger.info('Falling back to alternative extraction methods')
     
-    logger.error(f'Could not extract archive: {filename}')
-    return False, f'Could not extract archive: {filename}'
+    # Try format-specific extractors based on file extension
+    logger.info('Trying format-specific extraction methods')
+    
+    # Method 1: Try zipfile for .zip files
+    if filename.lower().endswith('.zip'):
+        try:
+            import zipfile
+            logger.info('Attempting extraction with Python zipfile module')
+            attempted_methods.append('zipfile')
+            
+            # First, verify it's a valid zip file
+            if not zipfile.is_zipfile(temp_archive_path):
+                logger.warning(f'File does not appear to be a valid ZIP file: {filename}')
+            else:
+                with zipfile.ZipFile(temp_archive_path, 'r') as zip_ref:
+                    # Get info about archive contents
+                    file_list = zip_ref.namelist()
+                    logger.info(f'ZIP archive contains {len(file_list)} files')
+                    
+                    # Extract all files
+                    zip_ref.extractall(extract_path)
+                    logger.info(f'✓ ZIP archive extracted successfully using zipfile: {filename}')
+                    return True, None
+                    
+        except zipfile.BadZipFile as e:
+            logger.error(f'zipfile failed - BadZipFile: {e}')
+        except zipfile.LargeZipFile as e:
+            logger.error(f'zipfile failed - LargeZipFile (requires ZIP64): {e}')
+        except Exception as e:
+            logger.error(f'zipfile extraction failed with unexpected error: {e}')
+            import traceback
+            logger.error(f'Traceback: {traceback.format_exc()}')
+    
+    # Method 2: Try tarfile for tar archives
+    elif filename.lower().endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz')):
+        try:
+            import tarfile
+            logger.info('Attempting extraction with Python tarfile module')
+            attempted_methods.append('tarfile')
+            
+            with tarfile.open(temp_archive_path, 'r:*') as tar_ref:
+                # Get info about archive contents
+                members = tar_ref.getmembers()
+                logger.info(f'TAR archive contains {len(members)} members')
+                
+                # Extract all files
+                tar_ref.extractall(extract_path)
+                logger.info(f'✓ TAR archive extracted successfully using tarfile: {filename}')
+                return True, None
+                
+        except tarfile.TarError as e:
+            logger.error(f'tarfile failed - TarError: {e}')
+        except Exception as e:
+            logger.error(f'tarfile extraction failed with unexpected error: {e}')
+            import traceback
+            logger.error(f'Traceback: {traceback.format_exc()}')
+    
+    # Method 3: Try unrar for .rar files
+    elif filename.lower().endswith('.rar'):
+        try:
+            unrar = shutil.which('unrar')
+            if unrar:
+                logger.info(f'Attempting extraction with unrar command: {unrar}')
+                attempted_methods.append('unrar')
+                
+                result = subprocess.run(
+                    [unrar, 'x', '-y', temp_archive_path, extract_path], 
+                    capture_output=True, 
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f'✓ RAR archive extracted successfully using unrar: {filename}')
+                    return True, None
+                else:
+                    logger.error(f'unrar failed with return code {result.returncode}')
+                    logger.error(f'unrar stderr: {result.stderr}')
+            else:
+                logger.warning('unrar command not found in PATH')
+                
+        except subprocess.TimeoutExpired:
+            logger.error('unrar extraction timed out after 5 minutes')
+        except Exception as e:
+            logger.error(f'unrar extraction failed with unexpected error: {e}')
+            import traceback
+            logger.error(f'Traceback: {traceback.format_exc()}')
+    
+    # Method 4: Try 7z as universal fallback for all formats
+    logger.info('Trying 7z as universal fallback extractor')
+    try:
+        sevenzip = shutil.which('7z') or shutil.which('7za')
+        if sevenzip:
+            logger.info(f'Attempting extraction with 7z command: {sevenzip}')
+            attempted_methods.append('7z')
+            
+            result = subprocess.run(
+                [sevenzip, 'x', '-y', f'-o{extract_path}', temp_archive_path], 
+                capture_output=True, 
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                logger.info(f'✓ Archive extracted successfully using 7z: {filename}')
+                return True, None
+            else:
+                logger.error(f'7z failed with return code {result.returncode}')
+                logger.error(f'7z stderr: {result.stderr}')
+                logger.error(f'7z stdout: {result.stdout}')
+        else:
+            logger.warning('7z command not found in PATH')
+            
+    except subprocess.TimeoutExpired:
+        logger.error('7z extraction timed out after 5 minutes')
+    except Exception as e:
+        logger.error(f'7z extraction failed with unexpected error: {e}')
+        import traceback
+        logger.error(f'Traceback: {traceback.format_exc()}')
+    
+    # If we get here, all methods failed
+    methods_tried = ', '.join(attempted_methods) if attempted_methods else 'none'
+    error_msg = f'All extraction methods failed for {filename}. Tried: {methods_tried}'
+    logger.error(error_msg)
+    logger.error(f'File details - Path: {temp_archive_path}, Size: {file_size} bytes')
+    logger.error('Possible causes: corrupted archive, unsupported format, missing extraction tools')
+    
+    return False, error_msg
 
 
 # Check file command support at module level

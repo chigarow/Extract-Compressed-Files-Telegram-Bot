@@ -156,137 +156,184 @@ async def download_from_torbox(
     url: str,
     output_path: str,
     progress_callback=None,
-    chunk_size: int = 1024 * 1024,  # 1 MB chunks
-    api_key: Optional[str] = None
+    chunk_size: int = 256 * 1024,  # 256 KB chunks for stability
+    api_key: Optional[str] = None,
+    max_retries: int = 5,
+    retry_delay: int = 5
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
-    Download a file from Torbox CDN link.
+    Download a file from Torbox CDN link with retry mechanism.
     
     Args:
         url: The Torbox CDN download URL
         output_path: Path where the file should be saved
         progress_callback: Optional callback function for progress updates (current, total)
-        chunk_size: Size of chunks to download (default 1MB)
+        chunk_size: Size of chunks to download (default 256KB for better stability)
         api_key: Optional Torbox API key for retrieving file metadata
+        max_retries: Maximum number of retry attempts (default 5)
+        retry_delay: Initial delay between retries in seconds (default 5)
         
     Returns:
         Tuple of (success: bool, error_message: Optional[str], actual_filename: Optional[str])
     """
     actual_filename = None
+    retry_count = 0
     
-    try:
-        logger.info(f"Starting Torbox download: {url}")
-        
-        # Try to get file metadata from API if key is provided
-        if api_key:
-            file_id = extract_file_id_from_url(url)
-            if file_id:
-                logger.info(f"Attempting to retrieve metadata for file ID: {file_id}")
-                metadata = await get_torbox_metadata(api_key)
+    while retry_count <= max_retries:
+        try:
+            if retry_count > 0:
+                delay = retry_delay * (2 ** (retry_count - 1))  # Exponential backoff
+                logger.info(f"Retry {retry_count}/{max_retries} for Torbox download after {delay}s delay: {url}")
+                await asyncio.sleep(delay)
+            else:
+                logger.info(f"Starting Torbox download: {url}")
+            
+            # Try to get file metadata from API if key is provided
+            if api_key:
+                file_id = extract_file_id_from_url(url)
+                if file_id:
+                    logger.info(f"Attempting to retrieve metadata for file ID: {file_id}")
+                    metadata = await get_torbox_metadata(api_key)
+                    
+                    # Search for matching file in the downloads list
+                    if metadata and isinstance(metadata, dict):
+                        downloads = metadata.get('data', [])
+                        for download in downloads:
+                            # Check if this download contains our file
+                            if isinstance(download, dict):
+                                files = download.get('files', [])
+                                for file_info in files:
+                                    if isinstance(file_info, dict):
+                                        # Match by ID or name pattern
+                                        if file_id in str(file_info.get('id', '')):
+                                            actual_filename = file_info.get('name', '')
+                                            logger.info(f"Found filename from API: {actual_filename}")
+                                            break
+                                if actual_filename:
+                                    break
+            
+            # Create output directory if it doesn't exist
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Set up HTTP session with extended timeout and keepalive
+            # total=None: No overall timeout (for large files)
+            # connect=60: 60s to establish connection
+            # sock_read=300: 5 minutes between data packets (for slow connections)
+            timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
+            
+            # Configure TCP keepalive to prevent connection drops
+            connector = aiohttp.TCPConnector(
+                keepalive_timeout=300,  # Keep connection alive for 5 minutes
+                force_close=False,  # Reuse connections
+                enable_cleanup_closed=True
+            )
+            
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                # Make GET request
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        error_msg = f"HTTP {response.status}: {response.reason}"
+                        logger.error(f"Torbox download failed: {error_msg}")
+                        return False, error_msg, None
+                    
+                    # Get total file size
+                    total_size = int(response.headers.get('content-length', 0))
+                    logger.info(f"Torbox file size: {human_size(total_size)}")
+                    
+                    # Get filename from Content-Disposition header if not from API
+                    if not actual_filename:
+                        content_disposition = response.headers.get('content-disposition', '')
+                        if content_disposition and 'filename=' in content_disposition:
+                            # Extract filename from header
+                            filename_match = re.search(r'filename[*]?=["\']?([^"\';\r\n]+)', content_disposition)
+                            if filename_match:
+                                actual_filename = filename_match.group(1)
+                                logger.info(f"Using filename from Content-Disposition: {actual_filename}")
+                    
+                    # Update output path with actual filename if found
+                    if actual_filename:
+                        output_dir = os.path.dirname(output_path)
+                        output_path = os.path.join(output_dir, actual_filename)
+                        logger.info(f"Saving to: {output_path}")
+                    
+                    # Download file in chunks
+                    downloaded = 0
+                    start_time = time.time()
+                    last_progress_time = start_time
+                    
+                    with open(output_path, 'wb') as f:
+                        async for chunk in response.content.iter_chunked(chunk_size):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                
+                                # Call progress callback if provided
+                                if progress_callback and total_size > 0:
+                                    try:
+                                        progress_callback(downloaded, total_size)
+                                    except Exception as e:
+                                        logger.warning(f"Progress callback error: {e}")
+                                
+                                # Log progress every 30 seconds for monitoring
+                                now = time.time()
+                                if now - last_progress_time > 30:
+                                    pct = int(downloaded * 100 / total_size) if total_size > 0 else 0
+                                    speed = downloaded / (now - start_time) if (now - start_time) > 0 else 0
+                                    logger.info(f"Download progress: {pct}% ({human_size(downloaded)}/{human_size(total_size)}) at {human_size(speed)}/s")
+                                    last_progress_time = now
                 
-                # Search for matching file in the downloads list
-                if metadata and isinstance(metadata, dict):
-                    downloads = metadata.get('data', [])
-                    for download in downloads:
-                        # Check if this download contains our file
-                        if isinstance(download, dict):
-                            files = download.get('files', [])
-                            for file_info in files:
-                                if isinstance(file_info, dict):
-                                    # Match by ID or name pattern
-                                    if file_id in str(file_info.get('id', '')):
-                                        actual_filename = file_info.get('name', '')
-                                        logger.info(f"Found filename from API: {actual_filename}")
-                                        break
-                            if actual_filename:
-                                break
-        
-        # Create output directory if it doesn't exist
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        # Set up HTTP session with timeout
-        timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=60)
-        
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Make GET request
-            async with session.get(url) as response:
-                if response.status != 200:
-                    error_msg = f"HTTP {response.status}: {response.reason}"
-                    logger.error(f"Torbox download failed: {error_msg}")
-                    return False, error_msg, None
+                    # Verify download
+                    actual_size = os.path.getsize(output_path)
+                    elapsed = time.time() - start_time
+                    avg_speed = actual_size / elapsed if elapsed > 0 else 0
+                    
+                    logger.info(f"Torbox download completed: {output_path}")
+                    logger.info(f"Downloaded {human_size(actual_size)} in {elapsed:.1f}s ({human_size(avg_speed)}/s)")
+                    
+                    if total_size > 0 and actual_size != total_size:
+                        error_msg = f"Download incomplete: {actual_size}/{total_size} bytes"
+                        logger.warning(f"Size mismatch on attempt {retry_count + 1}: expected {total_size}, got {actual_size}")
+                        raise aiohttp.ClientError(error_msg)  # Trigger retry
+                    
+                    # Success!
+                    return True, None, actual_filename or os.path.basename(output_path)
+                    
+        except (asyncio.TimeoutError, aiohttp.ClientError, ConnectionError) as e:
+            # These are retriable errors
+            retry_count += 1
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            if retry_count <= max_retries:
+                logger.warning(f"Torbox download {error_type} (attempt {retry_count}/{max_retries}): {error_msg}")
+                # Clean up partial download
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                        logger.info(f"Cleaned up partial download: {output_path}")
+                    except Exception:
+                        pass
+                continue  # Retry
+            else:
+                logger.error(f"Torbox download failed after {max_retries} retries: {error_msg}")
+                return False, f"{error_type} after {max_retries} retries: {error_msg}", actual_filename
                 
-                # Get total file size
-                total_size = int(response.headers.get('content-length', 0))
-                logger.info(f"Torbox file size: {human_size(total_size)}")
-                
-                # Get filename from Content-Disposition header if not from API
-                if not actual_filename:
-                    content_disposition = response.headers.get('content-disposition', '')
-                    if content_disposition and 'filename=' in content_disposition:
-                        # Extract filename from header
-                        filename_match = re.search(r'filename[*]?=["\']?([^"\';\r\n]+)', content_disposition)
-                        if filename_match:
-                            actual_filename = filename_match.group(1)
-                            logger.info(f"Using filename from Content-Disposition: {actual_filename}")
-                
-                # Update output path with actual filename if found
-                if actual_filename:
-                    output_dir = os.path.dirname(output_path)
-                    output_path = os.path.join(output_dir, actual_filename)
-                    logger.info(f"Saving to: {output_path}")
-                
-                # Download file in chunks
-                downloaded = 0
-                start_time = time.time()
-                
-                with open(output_path, 'wb') as f:
-                    async for chunk in response.content.iter_chunked(chunk_size):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            # Call progress callback if provided
-                            if progress_callback and total_size > 0:
-                                try:
-                                    progress_callback(downloaded, total_size)
-                                except Exception as e:
-                                    logger.warning(f"Progress callback error: {e}")
-                
-                # Verify download
-                actual_size = os.path.getsize(output_path)
-                elapsed = time.time() - start_time
-                avg_speed = actual_size / elapsed if elapsed > 0 else 0
-                
-                logger.info(f"Torbox download completed: {output_path}")
-                logger.info(f"Downloaded {human_size(actual_size)} in {elapsed:.1f}s ({human_size(avg_speed)}/s)")
-                
-                if total_size > 0 and actual_size != total_size:
-                    logger.warning(f"Size mismatch: expected {total_size}, got {actual_size}")
-                    return False, f"Download incomplete: {actual_size}/{total_size} bytes", actual_filename
-                
-                return True, None, actual_filename or os.path.basename(output_path)
-                
-    except asyncio.TimeoutError:
-        error_msg = "Download timeout"
-        logger.error(f"Torbox download timeout: {url}")
-        return False, error_msg, actual_filename
-        
-    except aiohttp.ClientError as e:
-        error_msg = f"Network error: {str(e)}"
-        logger.error(f"Torbox download network error: {error_msg}")
-        return False, error_msg, actual_filename
-        
-    except OSError as e:
-        error_msg = f"File system error: {str(e)}"
-        logger.error(f"Torbox download file system error: {error_msg}")
-        return False, error_msg, actual_filename
-        
-    except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}"
-        logger.error(f"Torbox download unexpected error: {error_msg}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return False, error_msg, actual_filename
+        except OSError as e:
+            # File system errors are not retriable
+            error_msg = f"File system error: {str(e)}"
+            logger.error(f"Torbox download file system error: {error_msg}")
+            return False, error_msg, actual_filename
+            
+        except Exception as e:
+            # Unexpected errors - log and fail
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"Torbox download unexpected error: {error_msg}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False, error_msg, actual_filename
+    
+    # Should not reach here, but just in case
+    return False, f"Download failed after {max_retries} retries", actual_filename
 
 
 async def download_torbox_with_progress(

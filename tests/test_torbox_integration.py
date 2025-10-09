@@ -228,7 +228,11 @@ class TestTorboxDownload:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
-            with patch('aiohttp.ClientSession', return_value=mock_session):
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
+            with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector):
                 success, error, filename = await download_from_torbox(url, output_path)
                 
                 assert success, f"Download should succeed, error: {error}"
@@ -255,7 +259,11 @@ class TestTorboxDownload:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
-            with patch('aiohttp.ClientSession', return_value=mock_session):
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
+            with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector):
                 success, error, filename = await download_from_torbox(url, output_path)
                 
                 assert not success, "Download should fail with HTTP error"
@@ -294,7 +302,11 @@ class TestTorboxDownload:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
-            with patch('aiohttp.ClientSession', return_value=mock_session):
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
+            with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector):
                 success, error, filename = await download_from_torbox(url, output_path, progress_callback=progress_callback)
                 
                 assert success, "Download should succeed"
@@ -330,7 +342,11 @@ class TestTorboxDownload:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
-            with patch('aiohttp.ClientSession', return_value=mock_session):
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
+            with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector):
                 success, error, filename = await download_torbox_with_progress(
                     url,
                     output_path,
@@ -482,7 +498,11 @@ class TestSDKIntegration:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
             with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector), \
                  patch('utils.torbox_downloader.get_torbox_metadata', return_value=mock_metadata):
                 
                 success, error, actual_filename = await download_from_torbox(
@@ -524,7 +544,11 @@ class TestSDKIntegration:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
             with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector), \
                  patch('utils.torbox_downloader.get_torbox_metadata', return_value=None):
                 
                 success, error, actual_filename = await download_from_torbox(
@@ -562,7 +586,11 @@ class TestSDKIntegration:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
-            with patch('aiohttp.ClientSession', return_value=mock_session):
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
+            with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector):
                 # Call without api_key parameter
                 success, error, actual_filename = await download_from_torbox(url, output_path)
                 
@@ -614,7 +642,11 @@ class TestSDKIntegration:
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            
             with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector), \
                  patch('utils.torbox_downloader.get_torbox_metadata', return_value=mock_metadata):
                 
                 success, error, actual_filename = await download_torbox_with_progress(
@@ -690,25 +722,35 @@ class TestEdgeCases:
             # Use a path with non-existent parent directory
             output_path = os.path.join(temp_dir, 'subdir', 'nested', 'test.zip')
             
-            # Mock aiohttp response
+            # Complete test data
+            test_data = b'test'
+            
+            # Mock aiohttp response - CRITICAL: content-length must match actual data
             mock_response = AsyncMock()
             mock_response.status = 200
-            mock_response.headers = {'content-length': '100'}
+            mock_response.headers = {'content-length': str(len(test_data))}
             
             async def mock_chunks():
-                yield b'test'
+                yield test_data
             
             mock_response.content.iter_chunked = lambda size: mock_chunks()
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
+            
+            # Mock TCPConnector to prevent initialization issues
+            mock_connector = AsyncMock()
+            mock_connector.__aenter__ = AsyncMock(return_value=mock_connector)
+            mock_connector.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
             mock_session.get = Mock(return_value=mock_response)
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
-            with patch('aiohttp.ClientSession', return_value=mock_session):
-                success, error, filename = await download_from_torbox(url, output_path)
+            with patch('aiohttp.ClientSession', return_value=mock_session), \
+                 patch('aiohttp.TCPConnector', return_value=mock_connector):
+                # Use max_retries=0 to prevent retry loops in this simple test
+                success, error, filename = await download_from_torbox(url, output_path, max_retries=0)
                 
                 # Directory should be created automatically
                 assert os.path.exists(os.path.dirname(output_path)), "Parent directory should be created"

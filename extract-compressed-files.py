@@ -60,6 +60,10 @@ from utils import (
     # FastTelethon downloads
     fast_download_to_file,
     
+    # Torbox downloads
+    is_torbox_link, extract_torbox_links, get_filename_from_url,
+    download_torbox_with_progress, detect_file_type_from_url,
+    
     # Command handlers
     handle_password_command, handle_max_concurrent_command, handle_set_max_archive_gb_command,
     handle_toggle_fast_download_command, handle_toggle_wifi_only_command, 
@@ -119,6 +123,108 @@ async def save_current_processes():
 # Archive and media processing is now handled by the queue system
 
 
+async def handle_torbox_link(event, torbox_url: str):
+    """Handle Torbox CDN link download and processing."""
+    try:
+        logger.info(f"Processing Torbox link: {torbox_url}")
+        
+        # Import config to get API key
+        from config import config
+        torbox_api_key = config.torbox_api_key if hasattr(config, 'torbox_api_key') else None
+        
+        # Get filename from URL (fallback)
+        filename = get_filename_from_url(torbox_url)
+        
+        # Detect file type from URL
+        file_type = detect_file_type_from_url(torbox_url)
+        logger.info(f"Detected Torbox file type: {file_type} for {filename}")
+        
+        # Prepare output path
+        temp_path = os.path.join(DATA_DIR, filename)
+        
+        # Send initial message
+        status_msg = await event.reply(f'🔗 Detected Torbox link!\n📥 Starting download: {filename}')
+        
+        # Download the file with API key for filename retrieval
+        success, error, actual_filename = await download_torbox_with_progress(
+            torbox_url,
+            temp_path,
+            status_msg=status_msg,
+            filename=filename,
+            api_key=torbox_api_key
+        )
+        
+        if not success:
+            await event.reply(f'❌ Failed to download from Torbox: {error}')
+            return
+        
+        # Update temp_path if filename changed
+        if actual_filename and actual_filename != filename:
+            temp_path = os.path.join(DATA_DIR, actual_filename)
+            logger.info(f"Using actual filename from API: {actual_filename}")
+        
+        # Get actual filename after download
+        if os.path.exists(temp_path):
+            actual_filename = os.path.basename(temp_path)
+            file_ext = os.path.splitext(actual_filename)[1].lower()
+        else:
+            await event.reply(f'❌ Downloaded file not found: {temp_path}')
+            return
+        
+        logger.info(f"Torbox download completed: {actual_filename} ({file_ext})")
+        
+        # Process based on file type
+        if file_ext in ARCHIVE_EXTENSIONS:
+            # It's an archive - add to processing queue for extraction
+            await status_msg.edit(f'✅ Downloaded archive: {actual_filename}\n📦 Adding to extraction queue...')
+            
+            processing_task = {
+                'type': 'extract_and_upload',
+                'temp_archive_path': temp_path,
+                'filename': actual_filename,
+                'event': event
+            }
+            
+            # Use the queue manager's extraction processing
+            await queue_manager._process_extraction_and_upload(processing_task)
+            
+        elif file_ext in MEDIA_EXTENSIONS:
+            # It's direct media - add to upload queue
+            await status_msg.edit(f'✅ Downloaded media: {actual_filename}\n📤 Adding to upload queue...')
+            
+            upload_task = {
+                'type': 'torbox_media',
+                'event': event,
+                'file_path': temp_path,
+                'filename': actual_filename,
+                'size_bytes': os.path.getsize(temp_path)
+            }
+            
+            await queue_manager.add_upload_task(upload_task)
+            await event.reply(f'📋 {actual_filename} added to upload queue')
+            
+        else:
+            # Unknown file type - try to process as media anyway
+            await status_msg.edit(f'✅ Downloaded: {actual_filename}\n⚠️ Unknown file type, attempting to upload...')
+            
+            upload_task = {
+                'type': 'torbox_unknown',
+                'event': event,
+                'file_path': temp_path,
+                'filename': actual_filename,
+                'size_bytes': os.path.getsize(temp_path)
+            }
+            
+            await queue_manager.add_upload_task(upload_task)
+            await event.reply(f'📋 {actual_filename} added to upload queue')
+        
+    except Exception as e:
+        logger.error(f"Error handling Torbox link: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await event.reply(f'❌ Error processing Torbox link: {e}')
+
+
 @client.on(events.NewMessage(incoming=True))
 async def watcher(event):
     """Main message watcher for handling incoming files and commands."""
@@ -174,6 +280,15 @@ async def watcher(event):
             else:
                 await event.reply(f'❌ Unknown command: {command}\n\nUse /help to see available commands.')
             return
+        
+        # Check for Torbox links in text messages
+        if text and not msg.file:
+            torbox_links = extract_torbox_links(text)
+            
+            if torbox_links:
+                for torbox_url in torbox_links:
+                    await handle_torbox_link(event, torbox_url)
+                return
         
         # Handle file messages
         if msg.file:

@@ -8,7 +8,6 @@ PROJECT_DIR="/data/data/com.termux/files/home/Extract-Compressed-Files-Telegram-
 # The path to your virtual environment's bin directory
 # !!! IMPORTANT !!!
 # You might need to change this path to match your Termux setup.
-# A common location is /data/data/com.termux/files/home/venv/bin
 VENV_BIN_DIR="/data/data/com.termux/files/home/venv/bin"
 # Path to the data directory to be monitored for active processing
 DATA_DIR="$PROJECT_DIR/data"
@@ -34,12 +33,36 @@ if ! [ -x "$PIP_EXEC" ]; then
     exit 1
 fi
 
-# --- Main Script Logic ---
-
+# --- Argument Parsing ---
 FORCE_RESTART=false
+# New Feature: Handle --force-kill argument to only kill the process
+if [ "$1" == "--force-kill" ]; then
+    echo -e "${RED}--- Force Killing Process: $SCRIPT_NAME ---${NC}"
+    PID=$(pgrep -f "$SCRIPT_NAME")
+    if [ -n "$PID" ]; then
+        echo "Found process with PID: $PID. Terminating immediately..."
+        kill -9 "$PID"
+        sleep 1 # Brief pause to allow the OS to process the kill command
+        if pgrep -f "$SCRIPT_NAME" > /dev/null; then
+            echo -e "${RED}Error: Failed to kill the process. It might be unresponsive.${NC}"
+            exit 1
+        else
+            echo -e "${GREEN}Process successfully terminated.${NC}"
+            exit 0 # Exit the script successfully after killing the process
+        fi
+    else
+        echo -e "${GREEN}No running process found. Nothing to kill.${NC}"
+        exit 0 # Exit successfully as there was nothing to do
+    fi
+fi
+
+# Handle the --force argument for a forceful restart
 if [ "$1" == "--force" ]; then
     FORCE_RESTART=true
 fi
+
+
+# --- Main Script Logic ---
 
 if [ "$FORCE_RESTART" = true ]; then
     echo -e "${YELLOW}--- Starting Forceful Update & Restart for $SCRIPT_NAME ---${NC}"
@@ -62,30 +85,17 @@ if [ "$FORCE_RESTART" = false ]; then
         while true; do
             # Check for any active operations (download, upload, conversion, extraction)
             # This includes archive files, extracted directories, compressed videos, and temporary files
-            ACTIVE_TASKS_FOUND=false
-
-            # Check for archive files being processed
-            if find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( -type d -name 'extracted_*' -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.bz2' -o -iname '*.xz' -o -iname '*.ts' \) -print -quit | grep -q .; then
-                ACTIVE_TASKS_FOUND=true
-            fi
-
-            # Check for video compression temp files
-            if find "$DATA_DIR" -maxdepth 1 -mindepth 1 -iname '*_compressed.mp4' -print -quit | grep -q .; then
-                ACTIVE_TASKS_FOUND=true
-            fi
-
-            # Check for video thumbnails
-            if find "$DATA_DIR" -maxdepth 1 -mindepth 1 -iname '*.thumb.jpg' -print -quit | grep -q .; then
-                ACTIVE_TASKS_FOUND=true
-            fi
-
-            # Check for any .part files (partial downloads)
-            if find "$DATA_DIR" -maxdepth 1 -mindepth 1 -name '*.part' -print -quit | grep -q .; then
-                ACTIVE_TASKS_FOUND=true
-            fi
-
-            if [ "$ACTIVE_TASKS_FOUND" = true ]; then
-                echo -e "${YELLOW} - Active operations detected (downloads, uploads, conversions, extractions). Waiting for 30 seconds...${NC}"
+            # The find command will exit with success (0) if it finds any matching file
+            if find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( \
+                -type d -name 'extracted_*' -o \
+                -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o \
+                -iname '*.tar' -o -iname '*.gz' -o -iname '*.bz2' -o \
+                -iname '*.xz' -o -iname '*.ts' -o \
+                -iname '*_compressed.mp4' -o \
+                -iname '*.thumb.jpg' -o \
+                -name '*.part' \
+            \) -print -quit | grep -q .; then
+                echo -e "${YELLOW} - Active operations detected. Waiting for 30 seconds...${NC}"
                 sleep 30
             else
                 echo -e "${GREEN} - No active operations detected. The script appears to be idle.${NC}"
@@ -94,15 +104,23 @@ if [ "$FORCE_RESTART" = false ]; then
         done
     else
         echo -e "${YELLOW} - Process is not running. Checking for leftover files from a previous run...${NC}"
-        # Find temporary files/directories
-        LEFTOVER_FILES=$(find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( -type d -name 'extracted_*' -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.bz2' -o -iname '*.xz' -o -iname '*_compressed.mp4' -o -iname '*.thumb.jpg' -o -name '*.part' -o -iname '*.ts' \))
-        if [ -n "$LEFTOVER_FILES" ]; then
-            echo -e "${YELLOW} - Found leftover files. Cleaning them up...${NC}"
-            # The -I{} and + are to handle many files without erroring
-            find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( -type d -name 'extracted_*' -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.bz2' -o -iname '*.xz' -o -iname '*_compressed.mp4' -o -iname '*.thumb.jpg' -o -name '*.part' -o -iname '*.ts' \) -exec rm -rf {} +
-            echo -e "${GREEN} - Cleanup complete.${NC}"
+        # Find temporary files/directories and clean them
+        # Using a direct find -exec for efficiency
+        find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( \
+            -type d -name 'extracted_*' -o \
+            -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o \
+            -iname '*.tar' -o -iname '*.gz' -o -iname '*.bz2' -o \
+            -iname '*.xz' -o -iname '*.ts' -o \
+            -iname '*_compressed.mp4' -o \
+            -iname '*.thumb.jpg' -o \
+            -name '*.part' \
+        \) -exec rm -rf {} +
+
+        # Check if anything was actually deleted by re-running the find command
+        if find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( -type d -name 'extracted_*' -o -iname '*.part' \) -print -quit | grep -q .; then
+             echo -e "${YELLOW} - Some leftover files may remain.${NC}"
         else
-            echo -e "${GREEN} - No leftover files found.${NC}"
+             echo -e "${GREEN} - Cleanup complete. No leftover files found.${NC}"
         fi
     fi
 else

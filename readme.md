@@ -6,6 +6,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 
 - **User Account Based Access**: Uses a user account (not a bot token) for authentication, controlled by specifying a target username in the configuration.
 - **Automatic Extraction**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz.
+- **Torbox CDN Downloads**: Automatically detects and downloads files from Torbox CDN links sent in text messages.
 - **Direct Media Upload**: Send images/videos directly to the user account and they will be re-uploaded to the target user as media in the Media tab.
 - **Media Filtering**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm, and many others).
 - **Duplicate Detection**: Avoids reprocessing archives that have been previously processed by maintaining a cache of file hashes.
@@ -115,6 +116,59 @@ In addition to processing compressed archives, you can now send images and video
     -   Delete the local file after upload.
 
 This feature is particularly useful when you want to optimize media files for Telegram or re-upload them to another account while ensuring they appear properly in the Media tab.
+
+### Torbox CDN Downloads
+
+The bot can now automatically download files from Torbox CDN links using the official Torbox SDK! Simply send a message containing a Torbox download link, and the bot will:
+
+1.  **Detect the Torbox link** in your message automatically
+2.  **Retrieve the actual filename** from the Torbox API (requires API key)
+3.  **Download the file** from the Torbox CDN with progress tracking
+4.  **Process based on file type**:
+    -   **Compressed archives** (zip, rar, 7z, etc.): Automatically extract and upload media files
+    -   **Media files** (photos, videos): Upload directly to the target user
+    -   **Unknown file types**: Attempt to upload as-is
+
+**Configuration:**
+To enable filename retrieval from the Torbox API, add your API key to `secrets.properties`:
+```ini
+TORBOX_API_KEY=your_torbox_api_key_here
+```
+
+Without the API key, the bot will still download files but will use fallback filename detection from the CDN URL and HTTP headers.
+
+**Supported Torbox Link Format:**
+```
+https://store-{number}.{region}.tb-cdn.st/{type}/{uuid}?token={token}
+```
+
+**Example:**
+```
+https://store-031.weur.tb-cdn.st/zip/e196451f-d609-42e8-a93c-4bfa68a45951?token=d1361ea3-0902-4ca3-b081-bb858e7566aa
+```
+
+**Features:**
+- Automatic link detection in text messages
+- SDK-based filename retrieval for accurate file names
+- Progress tracking during download
+- Smart file type detection (archive, video, photo)
+- Seamless integration with existing extraction and upload queues
+- Works with password-protected archives (after download)
+- Supports all Torbox CDN regions and storage nodes
+- Fallback to Content-Disposition header if API key not configured
+
+**Usage:**
+Simply send any message containing a Torbox CDN link to the bot:
+```
+Check out this file: https://store-031.weur.tb-cdn.st/zip/example.zip?token=abc123
+```
+
+The bot will automatically:
+1. Reply with "🔗 Detected Torbox link!"
+2. Retrieve the actual filename from Torbox API (if API key is configured)
+3. Start downloading with progress updates showing the real filename
+4. Process the file (extract if archive, or upload if media)
+5. Clean up temporary files
 
 ### Video Quality and Thumbnail Fixes
 
@@ -375,9 +429,25 @@ The script supports a comprehensive set of commands for configuration and monito
 - **`/toggle_transcoding`** - Enable/disable video transcoding
 - **`/compression-timeout <value>`** - Set compression timeout (e.g., 5m, 120m, 300s)
 
-## Recent Updates (September 2025)
+## Recent Updates (October 2025)
 
-### Queue Processing and Workflow Improvements
+### Torbox CDN Integration
+
+**Torbox Link Download Support**: The bot now supports automatic downloads from Torbox CDN links:
+
+- **Automatic Detection**: Torbox links in text messages are automatically detected and processed
+- **Smart Processing**: Archives are extracted, media files are uploaded directly
+- **Progress Tracking**: Real-time download progress with size and speed information
+- **Type Detection**: Automatically identifies file type (archive, video, photo) from URL
+- **Queue Integration**: Downloads feed into existing extraction and upload queues
+- **Error Handling**: Comprehensive error handling with retry support
+
+**Torbox Link Format:**
+```
+https://store-{number}.{region}.tb-cdn.st/{type}/{uuid}?token={token}
+```
+
+### Queue Processing and Workflow Improvements (September 2025)
 
 **Parallel Processing Implementation**: The bot now supports truly parallel processing workflows:
 

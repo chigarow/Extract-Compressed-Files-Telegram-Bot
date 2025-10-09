@@ -49,6 +49,8 @@ class Config:
         # Video compression timeout (seconds). Default 300 (5 minutes)
         # Can be overridden in secrets.properties via COMPRESSION_TIMEOUT_SECONDS
         self.compression_timeout_seconds = self._getint('COMPRESSION_TIMEOUT_SECONDS', 300)
+        # Torbox API key for CDN downloads
+        self.torbox_api_key = self._get('TORBOX_API_KEY', '')
 
     def _get(self, key, fallback=None):
         return self._config.get('DEFAULT', key, fallback=fallback)

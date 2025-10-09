@@ -233,11 +233,6 @@ async def handle_login_response(event):
         return True
     
     return False
-            except:
-                pass
-        return True
-    
-    return False
 
 
 async def save_current_processes():

@@ -7,10 +7,12 @@ Tests that serialized message objects are handled correctly.
 import asyncio
 import sys
 from pathlib import Path
+import pytest
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+@pytest.mark.asyncio
 async def test_restored_task_detection():
     """Test detection of restored vs live tasks"""
     print("🧪 Testing restored task detection...")
@@ -110,6 +112,7 @@ def test_message_reconstruction_logic():
         print(f"❌ Test failed: {e}")
         return False
 
+@pytest.mark.asyncio
 async def test_progress_callback_handling():
     """Test that progress callbacks work for both task types"""
     print("\n🧪 Testing progress callback handling...")

@@ -13,6 +13,10 @@ from .constants import DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RET
 from .cache_manager import PersistentQueue
 from .constants import DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE, RETRY_QUEUE_FILE
 
+# Telegram's hard limit for media files per album/grouped message
+# Source: https://limits.tginfo.me/en and official Telegram documentation
+TELEGRAM_ALBUM_MAX_FILES = 10
+
 # Backwards compatibility shim for tests that patch needs_video_processing at queue_manager level
 try:  # pragma: no cover
     needs_video_processing  # type: ignore
@@ -279,39 +283,89 @@ class QueueManager:
             # Only create groups if we have multiple files of the same type
             # Otherwise keep as individual tasks
             if len(images) >= 2:
-                # Create grouped image task
-                grouped_task = {
-                    'type': 'grouped_media',
-                    'media_type': 'images',
-                    'event': None,  # Restored tasks have no event
-                    'file_paths': images,
-                    'filename': f"{source_archive} - Images ({len(images)} files)",
-                    'source_archive': source_archive,
-                    'extraction_folder': extraction_folder,
-                    'is_grouped': True,
-                    'retry_count': 0
-                }
-                new_grouped_tasks.append(grouped_task)
-                logger.info(f"📦 Created grouped task: {len(images)} images from {source_archive}")
+                # Telegram limit: max 10 media files per album
+                # Split large groups into batches
+                if len(images) > TELEGRAM_ALBUM_MAX_FILES:
+                    logger.info(f"📊 Splitting {len(images)} images into batches of {TELEGRAM_ALBUM_MAX_FILES} (Telegram album limit)")
+                    
+                    # Create multiple batched grouped tasks
+                    for batch_num, i in enumerate(range(0, len(images), TELEGRAM_ALBUM_MAX_FILES), 1):
+                        batch_images = images[i:i + TELEGRAM_ALBUM_MAX_FILES]
+                        total_batches = (len(images) + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES
+                        
+                        grouped_task = {
+                            'type': 'grouped_media',
+                            'media_type': 'images',
+                            'event': None,  # Restored tasks have no event
+                            'file_paths': batch_images,
+                            'filename': f"{source_archive} - Images (Batch {batch_num}/{total_batches}: {len(batch_images)} files)",
+                            'source_archive': source_archive,
+                            'extraction_folder': extraction_folder,
+                            'is_grouped': True,
+                            'retry_count': 0,
+                            'batch_info': {'batch_num': batch_num, 'total_batches': total_batches}
+                        }
+                        new_grouped_tasks.append(grouped_task)
+                        logger.info(f"📦 Created batch {batch_num}/{total_batches}: {len(batch_images)} images from {source_archive}")
+                else:
+                    # Within limit - create single grouped task
+                    grouped_task = {
+                        'type': 'grouped_media',
+                        'media_type': 'images',
+                        'event': None,  # Restored tasks have no event
+                        'file_paths': images,
+                        'filename': f"{source_archive} - Images ({len(images)} files)",
+                        'source_archive': source_archive,
+                        'extraction_folder': extraction_folder,
+                        'is_grouped': True,
+                        'retry_count': 0
+                    }
+                    new_grouped_tasks.append(grouped_task)
+                    logger.info(f"📦 Created grouped task: {len(images)} images from {source_archive}")
             elif len(images) == 1:
                 # Single image - keep as individual
                 ungroupable.extend([item for item in original_items if item.get('file_path') in images])
             
             if len(videos) >= 2:
-                # Create grouped video task
-                grouped_task = {
-                    'type': 'grouped_media',
-                    'media_type': 'videos',
-                    'event': None,  # Restored tasks have no event
-                    'file_paths': videos,
-                    'filename': f"{source_archive} - Videos ({len(videos)} files)",
-                    'source_archive': source_archive,
-                    'extraction_folder': extraction_folder,
-                    'is_grouped': True,
-                    'retry_count': 0
-                }
-                new_grouped_tasks.append(grouped_task)
-                logger.info(f"📦 Created grouped task: {len(videos)} videos from {source_archive}")
+                # Telegram limit: max 10 media files per album
+                # Split large groups into batches
+                if len(videos) > TELEGRAM_ALBUM_MAX_FILES:
+                    logger.info(f"📊 Splitting {len(videos)} videos into batches of {TELEGRAM_ALBUM_MAX_FILES} (Telegram album limit)")
+                    
+                    # Create multiple batched grouped tasks
+                    for batch_num, i in enumerate(range(0, len(videos), TELEGRAM_ALBUM_MAX_FILES), 1):
+                        batch_videos = videos[i:i + TELEGRAM_ALBUM_MAX_FILES]
+                        total_batches = (len(videos) + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES
+                        
+                        grouped_task = {
+                            'type': 'grouped_media',
+                            'media_type': 'videos',
+                            'event': None,  # Restored tasks have no event
+                            'file_paths': batch_videos,
+                            'filename': f"{source_archive} - Videos (Batch {batch_num}/{total_batches}: {len(batch_videos)} files)",
+                            'source_archive': source_archive,
+                            'extraction_folder': extraction_folder,
+                            'is_grouped': True,
+                            'retry_count': 0,
+                            'batch_info': {'batch_num': batch_num, 'total_batches': total_batches}
+                        }
+                        new_grouped_tasks.append(grouped_task)
+                        logger.info(f"📦 Created batch {batch_num}/{total_batches}: {len(batch_videos)} videos from {source_archive}")
+                else:
+                    # Within limit - create single grouped task
+                    grouped_task = {
+                        'type': 'grouped_media',
+                        'media_type': 'videos',
+                        'event': None,  # Restored tasks have no event
+                        'file_paths': videos,
+                        'filename': f"{source_archive} - Videos ({len(videos)} files)",
+                        'source_archive': source_archive,
+                        'extraction_folder': extraction_folder,
+                        'is_grouped': True,
+                        'retry_count': 0
+                    }
+                    new_grouped_tasks.append(grouped_task)
+                    logger.info(f"📦 Created grouped task: {len(videos)} videos from {source_archive}")
             elif len(videos) == 1:
                 # Single video - keep as individual
                 ungroupable.extend([item for item in original_items if item.get('file_path') in videos])
@@ -897,6 +951,15 @@ class QueueManager:
             return
         
         logger.info(f"Executing grouped upload for {filename}: {len(existing_files)} files")
+        
+        # Validate against Telegram's album limit
+        if len(existing_files) > TELEGRAM_ALBUM_MAX_FILES:
+            logger.warning(f"⚠️ Grouped upload has {len(existing_files)} files, exceeds Telegram limit of {TELEGRAM_ALBUM_MAX_FILES}")
+            logger.info(f"📊 This task should have been batched during creation. Proceeding with first {TELEGRAM_ALBUM_MAX_FILES} files.")
+            logger.info(f"💡 Remaining {len(existing_files) - TELEGRAM_ALBUM_MAX_FILES} files will need to be uploaded separately.")
+            
+            # Truncate to limit (this is a safety measure - ideally shouldn't happen)
+            existing_files = existing_files[:TELEGRAM_ALBUM_MAX_FILES]
         
         try:
             # Initialize components
@@ -1518,38 +1581,85 @@ class QueueManager:
             
             logger.info(f"Grouped files: {len(image_files)} images, {len(video_files)} videos")
             
+            # Calculate number of groups (considering Telegram's 10-file limit)
+            num_image_groups = (len(image_files) + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES if image_files else 0
+            num_video_groups = (len(video_files) + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES if video_files else 0
+            total_groups = num_image_groups + num_video_groups
+            
+            logger.info(f"📊 Will create {total_groups} upload groups (images: {num_image_groups}, videos: {num_video_groups})")
+            
             # Register extraction folder for cleanup tracking
-            # We'll upload groups, so count groups instead of individual files
-            num_groups = (1 if image_files else 0) + (1 if video_files else 0)
-            await self.extraction_cleanup_registry.register_extraction(extract_path, num_groups)
+            await self.extraction_cleanup_registry.register_extraction(extract_path, total_groups)
             
-            # Upload images as a group
+            # Upload images in batches (max 10 per album due to Telegram limit)
             if image_files:
-                upload_task = {
-                    'type': 'grouped_media',
-                    'media_type': 'images',
-                    'event': event,
-                    'file_paths': image_files,
-                    'filename': f"{filename} - Images ({len(image_files)} files)",
-                    'source_archive': filename,
-                    'extraction_folder': extract_path,
-                    'is_grouped': True
-                }
-                await self.add_upload_task(upload_task)
+                if len(image_files) > TELEGRAM_ALBUM_MAX_FILES:
+                    logger.info(f"📊 Splitting {len(image_files)} images into batches of {TELEGRAM_ALBUM_MAX_FILES}")
+                    
+                    for batch_num, i in enumerate(range(0, len(image_files), TELEGRAM_ALBUM_MAX_FILES), 1):
+                        batch_images = image_files[i:i + TELEGRAM_ALBUM_MAX_FILES]
+                        total_batches = (len(image_files) + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES
+                        
+                        upload_task = {
+                            'type': 'grouped_media',
+                            'media_type': 'images',
+                            'event': event,
+                            'file_paths': batch_images,
+                            'filename': f"{filename} - Images (Batch {batch_num}/{total_batches}: {len(batch_images)} files)",
+                            'source_archive': filename,
+                            'extraction_folder': extract_path,
+                            'is_grouped': True,
+                            'batch_info': {'batch_num': batch_num, 'total_batches': total_batches}
+                        }
+                        await self.add_upload_task(upload_task)
+                        logger.info(f"📦 Queued image batch {batch_num}/{total_batches} for upload")
+                else:
+                    upload_task = {
+                        'type': 'grouped_media',
+                        'media_type': 'images',
+                        'event': event,
+                        'file_paths': image_files,
+                        'filename': f"{filename} - Images ({len(image_files)} files)",
+                        'source_archive': filename,
+                        'extraction_folder': extract_path,
+                        'is_grouped': True
+                    }
+                    await self.add_upload_task(upload_task)
             
-            # Upload videos as a group
+            # Upload videos in batches (max 10 per album due to Telegram limit)
             if video_files:
-                upload_task = {
-                    'type': 'grouped_media',
-                    'media_type': 'videos',
-                    'event': event,
-                    'file_paths': video_files,
-                    'filename': f"{filename} - Videos ({len(video_files)} files)",
-                    'source_archive': filename,
-                    'extraction_folder': extract_path,
-                    'is_grouped': True
-                }
-                await self.add_upload_task(upload_task)
+                if len(video_files) > TELEGRAM_ALBUM_MAX_FILES:
+                    logger.info(f"📊 Splitting {len(video_files)} videos into batches of {TELEGRAM_ALBUM_MAX_FILES}")
+                    
+                    for batch_num, i in enumerate(range(0, len(video_files), TELEGRAM_ALBUM_MAX_FILES), 1):
+                        batch_videos = video_files[i:i + TELEGRAM_ALBUM_MAX_FILES]
+                        total_batches = (len(video_files) + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES
+                        
+                        upload_task = {
+                            'type': 'grouped_media',
+                            'media_type': 'videos',
+                            'event': event,
+                            'file_paths': batch_videos,
+                            'filename': f"{filename} - Videos (Batch {batch_num}/{total_batches}: {len(batch_videos)} files)",
+                            'source_archive': filename,
+                            'extraction_folder': extract_path,
+                            'is_grouped': True,
+                            'batch_info': {'batch_num': batch_num, 'total_batches': total_batches}
+                        }
+                        await self.add_upload_task(upload_task)
+                        logger.info(f"📦 Queued video batch {batch_num}/{total_batches} for upload")
+                else:
+                    upload_task = {
+                        'type': 'grouped_media',
+                        'media_type': 'videos',
+                        'event': event,
+                        'file_paths': video_files,
+                        'filename': f"{filename} - Videos ({len(video_files)} files)",
+                        'source_archive': filename,
+                        'extraction_folder': extract_path,
+                        'is_grouped': True
+                    }
+                    await self.add_upload_task(upload_task)
             
             # Clean up the original archive
             try:

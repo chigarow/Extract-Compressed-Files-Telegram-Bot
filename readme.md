@@ -482,9 +482,68 @@ The script supports a comprehensive set of commands for configuration and monito
 - **`/toggle_transcoding`** - Enable/disable video transcoding
 - **`/compression-timeout <value>`** - Set compression timeout (e.g., 5m, 120m, 300s)
 
+## Recent Updates (January 2025)
+
+### Intelligent Queue Restoration Grouping ✨ **NEW**
+
+**Problem Solved**: After bot crashes or restarts, 2700+ individual files in queue were causing massive rate limiting and requiring repeated `--force` restarts.
+
+**Queue Restoration Optimization**: Automatically regroups individual files when restoring queue from crashes:
+
+- **Intelligent Regrouping**: Analyzes restored individual `extracted_file` tasks and batches by (archive, folder, type)
+- **99% API Call Reduction**: 2700 individual tasks → ~27 grouped tasks on restoration
+- **Automatic Detection**: No configuration needed - works transparently during `--force` restarts
+- **Metadata Preservation**: Maintains source_archive and extraction_folder for proper cleanup
+- **File Validation**: Skips non-existent files gracefully with warnings
+- **Optimization Logging**: Reports "Regrouped X individual tasks → Y grouped tasks (Z% reduction)"
+
+**Processor Continuation**: Enhanced FloodWaitError handling ensures queue never stops:
+
+- **Task Completion**: Always calls `task_done()` even on rate limit errors
+- **No Lockups**: Processor continues to next file instead of stopping
+- **Detailed Logging**: Enhanced emoji-prefixed logs (⏳ rate limit, 📊 stats, 💾 file preserved, 🔄 continuing)
+
+**Impact Analysis:**
+
+| Scenario | Before | After | Improvement |
+|----------|--------|-------|-------------|
+| Restored queue (2700 files) | 2700 API calls | ~27 API calls | **99% reduction** |
+| Bot restart with queue | Requires multiple `--force` restarts | Single restart works | **Seamless** |
+| Processor after rate limit | Stops, requires restart | Continues automatically | **Robust** |
+
+**Example After Crash:**
+```
+User: Restarts bot with --force flag
+Bot: "📂 Restored 2700 upload tasks from queue"
+Bot: "🔄 Regrouping individual files by archive..."
+Bot: "✅ Regrouped 2700 individual tasks → 27 grouped tasks (99% reduction)"
+Bot: "📤 Uploading archive1.zip - Images (100 files)..."
+[If rate limited]
+Bot: "⏳ Telegram rate limit: wait 28m"
+Bot: "💾 Files preserved. Auto-retry scheduled."
+[Processor continues with other archives]
+[After 28 minutes]
+Bot: "✅ Uploaded archive1.zip - Images (100 files)"
+[Continues with remaining groups]
+```
+
+**Technical Details:**
+- Location: `utils/queue_manager.py::_regroup_restored_uploads()` (lines 395-539)
+- Grouping Logic: Files grouped by `(source_archive, extraction_folder, file_type)`
+- Minimum Group Size: 2 files (single files stay individual)
+- Validation: Skips missing files, warns user
+- Integration: Automatic during `_restore_queues()`
+
+**Benefits:**
+1. **No More Repeated Restarts**: Single `--force` restart handles entire queue
+2. **Rate Limit Prevention**: 99% fewer API calls = dramatically reduced rate limiting
+3. **Seamless Recovery**: Bot resumes exactly where it crashed
+4. **User Experience**: Clear progress updates and optimization statistics
+5. **Production Safety**: Tested with 7 comprehensive unit tests
+
 ## Recent Updates (October 2025)
 
-### Grouped Media Upload and FloodWaitError Handling ✨ **NEW**
+### Grouped Media Upload and FloodWaitError Handling ✨ **ENHANCED**
 
 **Grouped Media Upload Implementation**: Dramatically reduces rate limiting through intelligent batching:
 

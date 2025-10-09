@@ -69,6 +69,49 @@ class ExtractionCleanupRegistry:
             logger.error(f"Failed to clean up extraction folder {extraction_folder}: {e}")
 
 
+class BackwardsCompatibleQueue(asyncio.Queue):
+    """
+    Extends asyncio.Queue with backwards compatibility methods for legacy tests.
+    
+    Provides list-like interface (len, iter, subscript) while maintaining async Queue functionality.
+    This allows legacy tests to work without modifying production code.
+    """
+    
+    def __len__(self):
+        """Return queue size for len() compatibility."""
+        return self.qsize()
+    
+    def __iter__(self):
+        """Return iterator over queue contents (snapshot)."""
+        # Create a snapshot of current queue contents
+        items = []
+        temp_items = []
+        
+        # Extract all items
+        while not self.empty():
+            try:
+                item = self.get_nowait()
+                items.append(item)
+                temp_items.append(item)
+            except asyncio.QueueEmpty:
+                break
+        
+        # Put items back
+        for item in temp_items:
+            self.put_nowait(item)
+        
+        return iter(items)
+    
+    def __getitem__(self, index):
+        """Support subscript access for legacy tests."""
+        items = list(self)
+        return items[index]
+    
+    def append(self, item):
+        """Provide list-like append for legacy tests."""
+        self.put_nowait(item)
+
+
 class QueueManager:
     """Manages download and upload queues with persistent storage and concurrency control.
 
@@ -77,22 +120,17 @@ class QueueManager:
     """
     
     def __init__(self, client=None):
-        # Create queues
-        self.download_queue = asyncio.Queue()
-        self.upload_queue = asyncio.Queue()
+        # Create backwards-compatible queues
+        self.download_queue = BackwardsCompatibleQueue()
+        self.upload_queue = BackwardsCompatibleQueue()
         self.retry_queue = []  # legacy structure used in some tests
         self.client = client  # optional injected client for tests
         self.is_processing = False  # legacy flag used by tests
         
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
-
-        # Provide list-like append for legacy tests manipulating internal queue directly
-        def _append_download(item):  # pragma: no cover
-            self.download_queue.put_nowait(item)
-        # Only attach if not already present
-        if not hasattr(self.download_queue, 'append'):
-            setattr(self.download_queue, 'append', _append_download)
+        
+        logger.info("QueueManager initialized with backwards-compatible queues for legacy test support")
         
         # Semaphores for concurrency control
         self.download_semaphore = asyncio.Semaphore(DOWNLOAD_SEMAPHORE_LIMIT)
@@ -925,6 +963,51 @@ class QueueManager:
         self.upload_persistent.clear()
 
     # -------------------- Backwards compatibility helper methods for tests --------------------
+    
+    def save_queues(self):
+        """
+        Save queues to persistent storage (backwards compatibility for legacy tests).
+        
+        In the current implementation, queues are saved automatically when items are added/removed.
+        This method is provided for legacy test compatibility but is essentially a no-op since
+        persistence happens automatically via PersistentQueue.
+        """
+        logger.debug("save_queues() called (legacy compatibility - persistence is automatic)")
+        # Current implementation uses PersistentQueue which saves automatically
+        # This method exists only for backwards compatibility with tests
+        pass
+    
+    def load_queues(self):
+        """
+        Load queues from persistent storage (backwards compatibility for legacy tests).
+        
+        In the current implementation, queues are loaded automatically in __init__ via _restore_queues().
+        This method is provided for legacy test compatibility but is essentially a no-op since
+        restoration happens automatically during initialization.
+        """
+        logger.debug("load_queues() called (legacy compatibility - restoration is automatic in __init__)")
+        # Current implementation uses _restore_queues() in __init__ to load automatically
+        # This method exists only for backwards compatibility with tests
+        pass
+    
+    async def start_processing(self):
+        """
+        Start queue processing (backwards compatibility for legacy tests).
+        
+        In the current implementation, processors start automatically when tasks are added.
+        This method ensures processors are running if items exist in queues.
+        """
+        logger.debug("start_processing() called (legacy compatibility method)")
+        await self.ensure_processors_started()
+    
+    async def stop_processing(self):
+        """
+        Stop queue processing (backwards compatibility for legacy tests).
+        
+        Stops all active processing tasks gracefully.
+        """
+        logger.debug("stop_processing() called (legacy compatibility method)")
+        await self.stop_all_tasks()
     def _queue_to_json_data(self):  # test helper
         from .cache_manager import make_serializable
         download_items = []

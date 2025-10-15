@@ -17,6 +17,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Proper Video Attributes**: Videos now have correct duration and thumbnail for proper display in Telegram (fixes black thumbnails and 00:00 duration).
 - **Media Tab Support**: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
 - **Grouped Media Uploads**: Uploads images and videos as separate grouped albums with archive name as caption. **NEW: Dramatically reduces rate limiting by batching files (97-99% fewer API calls).**
+- **Automatic Image Compression**: **NEW: Automatically compresses photos exceeding Telegram's 10MB limit using iterative quality reduction, ensuring all images upload successfully without manual intervention.**
 - **Intelligent Rate Limit Handling**: Comprehensive FloodWaitError handling that automatically respects Telegram's rate limits, preserves files during wait periods, and retries indefinitely until successful. **NEW: No more failed uploads due to rate limiting.**
 - **Sequential Processing**: Fully sequential file processing (download → compress → upload → cleanup) to prevent memory issues on low-resource devices like Android Termux. Only one file is processed at a time to minimize memory usage.
 - **Crash Recovery System**: Current processing state is saved to `current_process.json` every minute to persist across restarts, ensuring graceful recovery after crashes.

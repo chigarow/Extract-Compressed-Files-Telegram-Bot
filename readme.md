@@ -98,6 +98,7 @@ This security feature prevents incidents where messages from unintended users (c
 
 - Python 3.7+
 - A Telegram account with API credentials
+- **Pillow**: Required for automatic image compression (`pip install Pillow`)
 - **Recommended**: `cryptg` package for optimal FastTelethon performance (`pip install cryptg`)
 
 ### Optional System Tools for Advanced Features
@@ -350,6 +351,55 @@ The script now uploads media files as grouped albums for better organization:
 - Fallback to individual uploads if grouped upload fails
 
 This feature makes it easier to identify which files came from which archive.
+
+### Automatic Image Compression for Telegram's 10MB Photo Limit
+
+The bot includes **intelligent automatic image compression** that handles Telegram's 10MB photo upload limit seamlessly:
+
+**How It Works:**
+When the bot detects Telegram's specific error message about photos exceeding 10MB during upload, it automatically:
+
+1. **Detects the Error**: Recognizes the exact error message: "The photo you tried to send cannot be saved by Telegram. A reason may be that it exceeds 10MB"
+2. **Compresses Images**: Uses Pillow library to intelligently compress oversized photos
+3. **Retries Upload**: Automatically retries the upload with compressed images
+
+**Compression Strategy:**
+- **Iterative Quality Reduction**: Starts at quality=95 and decreases by 5 until the image is under 10MB (minimum quality=50)
+- **Format Optimization**: Converts PNG, WEBP, and other formats to JPEG for better compression ratios
+- **Transparency Handling**: Converts RGBA images to RGB with white background
+- **Dimension Resizing**: As a last resort, resizes image dimensions while maintaining aspect ratio
+- **Quality Preservation**: Uses the highest quality possible while meeting Telegram's size requirements
+
+**User Experience:**
+```
+User: Sends archive with large photos (e.g., 12MB JPEG files)
+Bot: "📦 Extracting archive.zip..."
+Bot: "📤 Uploading 8 images as album..."
+Bot: "🖼️ Detected Telegram 10MB photo size limit error"
+Bot: "🔧 Attempting to compress 8 images to under 10MB..."
+Bot: "🗜️ Compressing images: 5/8..."
+Bot: "✅ Compressed image.jpg: 12.45 MB → 8.21 MB (34.1% reduction)"
+Bot: "🗜️ Compressed 8 images. Retrying upload..."
+Bot: "✅ Uploaded 8 images"
+```
+
+**Features:**
+- ✅ **Automatic Detection**: No configuration needed, works automatically
+- ✅ **Intelligent Compression**: Only compresses files that exceed 10MB
+- ✅ **Quality Preservation**: Uses iterative approach to maintain maximum quality
+- ✅ **Format Support**: Handles JPEG, PNG, WEBP, BMP, and other common formats
+- ✅ **Progress Updates**: Shows compression progress every 5 images
+- ✅ **Non-Destructive**: Creates compressed versions, preserves originals during retry
+- ✅ **Graceful Fallback**: Falls back to normal retry logic if compression fails
+
+**Technical Details:**
+- Uses Pillow (PIL) library for image manipulation
+- Target size: 10MB (Telegram's photo upload limit)
+- Compression algorithm: Iterative JPEG quality reduction (95 → 90 → 85 ... → 50)
+- Fallback strategy: Dimension resizing at 90%, 80%, 70%, 60%, 50% of original
+- Always optimizes JPEG encoding with `optimize=True` flag
+
+This feature eliminates a common source of upload failures and ensures all your photos successfully reach Telegram, regardless of their original size.
 
 ### Sequential Processing for Low-Resource Devices
 

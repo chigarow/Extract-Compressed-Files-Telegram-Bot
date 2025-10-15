@@ -1120,7 +1120,96 @@ class QueueManager:
             
         except Exception as e:
             retry_count = task.get('retry_count', 0) + 1
+            error_message = str(e)
             logger.error(f"Grouped upload failed for {filename} (attempt {retry_count}): {e}")
+            
+            # Check if this is Telegram's 10MB photo size limit error
+            from .media_processing import is_telegram_photo_size_error, compress_image_for_telegram
+            from .constants import PHOTO_EXTENSIONS
+            
+            if is_telegram_photo_size_error(error_message) and media_type == 'Images':
+                logger.warning(f"🖼️ Detected Telegram 10MB photo size limit error for {filename}")
+                logger.info(f"🔧 Attempting to compress {len(existing_files)} images to under 10MB...")
+                
+                # Compress all image files in the batch
+                compressed_files = []
+                compression_failed = False
+                
+                for i, file_path in enumerate(existing_files, 1):
+                    if not os.path.exists(file_path):
+                        logger.warning(f"File not found during compression: {file_path}")
+                        continue
+                    
+                    file_ext = os.path.splitext(file_path)[1].lower()
+                    if file_ext not in PHOTO_EXTENSIONS:
+                        logger.warning(f"Skipping non-image file: {file_path}")
+                        compressed_files.append(file_path)
+                        continue
+                    
+                    # Check if file exceeds 10MB
+                    file_size = os.path.getsize(file_path)
+                    if file_size <= 10 * 1024 * 1024:  # 10MB
+                        logger.debug(f"Image {i}/{len(existing_files)} already under 10MB: {os.path.basename(file_path)}")
+                        compressed_files.append(file_path)
+                        continue
+                    
+                    logger.info(f"🗜️ Compressing image {i}/{len(existing_files)}: {os.path.basename(file_path)} ({file_size / (1024*1024):.2f} MB)")
+                    
+                    # Notify user about compression progress (if upload_msg is available)
+                    if 'upload_msg' in locals() and upload_msg and i % 5 == 0:  # Update every 5 images
+                        try:
+                            await upload_msg.edit(f"🗜️ Compressing images: {i}/{len(existing_files)}...")
+                        except Exception:
+                            pass
+                    
+                    # Generate compressed file path
+                    base_name, ext = os.path.splitext(file_path)
+                    compressed_path = base_name + '_compressed.jpg'
+                    
+                    # Compress the image
+                    result = await compress_image_for_telegram(file_path, compressed_path)
+                    
+                    if result and os.path.exists(result):
+                        compressed_size = os.path.getsize(result)
+                        reduction = ((file_size - compressed_size) / file_size) * 100
+                        logger.info(f"✅ Compressed {os.path.basename(file_path)}: {file_size / (1024*1024):.2f} MB -> {compressed_size / (1024*1024):.2f} MB ({reduction:.1f}% reduction)")
+                        
+                        # Use compressed file
+                        compressed_files.append(result)
+                        
+                        # Delete original if it's different from compressed
+                        if file_path != result:
+                            try:
+                                os.remove(file_path)
+                                logger.debug(f"Removed original file: {file_path}")
+                            except Exception as del_e:
+                                logger.warning(f"Failed to remove original file {file_path}: {del_e}")
+                    else:
+                        logger.error(f"❌ Failed to compress image: {file_path}")
+                        compression_failed = True
+                        # Keep original file for retry
+                        compressed_files.append(file_path)
+                
+                if not compression_failed and compressed_files:
+                    # Update the task with compressed files and retry immediately
+                    logger.info(f"✅ Successfully compressed all images, retrying upload with {len(compressed_files)} compressed files")
+                    
+                    retry_task = task.copy()
+                    retry_task['file_paths'] = compressed_files
+                    retry_task['retry_count'] = retry_count
+                    retry_task['retry_after'] = time.time() + 5  # Short delay
+                    retry_task['compressed'] = True  # Mark as already compressed
+                    
+                    await self._add_to_retry_queue(retry_task)
+                    
+                    if event and hasattr(event, 'reply'):
+                        await event.reply(f'🗜️ Compressed {len(compressed_files)} images. Retrying upload...')
+                    
+                    logger.info(f"💾 Keeping {len(compressed_files)} compressed files for retry")
+                    return  # Exit early, retry will happen automatically
+                else:
+                    logger.error(f"❌ Image compression failed for one or more files in {filename}")
+                    # Fall through to normal retry logic
             
             if retry_count < MAX_RETRY_ATTEMPTS:
                 # Schedule retry with exponential backoff

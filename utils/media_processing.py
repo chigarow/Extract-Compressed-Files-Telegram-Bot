@@ -4,6 +4,7 @@ Contains functions for video processing, format validation, and media operations
 """
 
 import os
+import io
 import shutil
 import subprocess
 import asyncio
@@ -11,6 +12,9 @@ import logging
 from .constants import TRANSCODE_ENABLED, COMPRESSION_TIMEOUT_SECONDS
 
 logger = logging.getLogger('extractor')
+
+# Telegram's 10MB photo upload limit (in bytes)
+TELEGRAM_PHOTO_SIZE_LIMIT = 10 * 1024 * 1024  # 10MB
 
 
 def is_ffmpeg_available():
@@ -307,3 +311,168 @@ async def get_video_attributes_and_thumbnail(input_path: str) -> tuple:
     except Exception as e:
         logger.error(f"Error extracting video attributes for {input_path}: {e}")
         return 0, 0, 0, None
+
+
+async def compress_image_for_telegram(input_path: str, output_path: str = None, target_size: int = TELEGRAM_PHOTO_SIZE_LIMIT) -> str:
+    """
+    Compress image to under Telegram's 10MB photo upload limit using iterative quality reduction.
+    
+    This function uses Pillow to:
+    1. Convert PNG/WEBP/other formats to JPEG for better compression
+    2. Iteratively reduce JPEG quality (starting at 95, decreasing by 5) until target size is met
+    3. Resize image dimensions as a last resort if quality reduction isn't enough
+    4. Maintain minimum quality threshold of 50 to ensure usability
+    
+    Args:
+        input_path: Path to the input image file
+        output_path: Path for the compressed output (optional, will generate from input_path if not provided)
+        target_size: Target file size in bytes (default: 10MB for Telegram limit)
+    
+    Returns:
+        Path to the compressed image file if successful, None if compression failed
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.error("Pillow library not found. Install with: pip install Pillow")
+        return None
+    
+    if not os.path.exists(input_path):
+        logger.error(f"Input image file not found: {input_path}")
+        return None
+    
+    # Check if image is already under the limit
+    original_size = os.path.getsize(input_path)
+    if original_size <= target_size:
+        logger.info(f"Image already under {target_size} bytes: {input_path} ({original_size} bytes)")
+        return input_path
+    
+    # Generate output path if not provided
+    if output_path is None:
+        base_name, ext = os.path.splitext(input_path)
+        output_path = base_name + '_compressed.jpg'
+    
+    try:
+        logger.info(f"Starting image compression: {input_path} ({original_size} bytes) -> target: {target_size} bytes")
+        
+        # Open image with Pillow
+        with Image.open(input_path) as img:
+            # Convert to RGB if necessary (for PNG with transparency, WEBP, etc.)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                # Create white background for transparency
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            original_dimensions = img.size
+            logger.info(f"Original image dimensions: {original_dimensions[0]}x{original_dimensions[1]}")
+            
+            # Strategy 1: Iterative quality reduction
+            quality = 95
+            min_quality = 50
+            quality_step = 5
+            
+            while quality >= min_quality:
+                # Save to memory buffer to check size
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=quality, optimize=True)
+                compressed_size = buffer.tell()
+                
+                logger.debug(f"Quality {quality}: {compressed_size} bytes")
+                
+                if compressed_size <= target_size:
+                    # Success! Save to actual file
+                    with open(output_path, 'wb') as f:
+                        f.write(buffer.getvalue())
+                    
+                    reduction_pct = ((original_size - compressed_size) / original_size) * 100
+                    logger.info(f"Image compression successful at quality={quality}: {output_path} ({compressed_size} bytes, {reduction_pct:.1f}% reduction)")
+                    return output_path
+                
+                quality -= quality_step
+            
+            # Strategy 2: If quality reduction isn't enough, resize dimensions
+            logger.info("Quality reduction insufficient, attempting dimension resize...")
+            
+            # Try progressively smaller sizes: 90%, 80%, 70%, 60%, 50%
+            for scale in [0.9, 0.8, 0.7, 0.6, 0.5]:
+                new_width = int(original_dimensions[0] * scale)
+                new_height = int(original_dimensions[1] * scale)
+                
+                # Ensure even dimensions
+                new_width = (new_width // 2) * 2
+                new_height = (new_height // 2) * 2
+                
+                resized_img = img.resize((new_width, new_height), Image.LANCZOS)
+                
+                # Try with quality 85 for resized image
+                buffer = io.BytesIO()
+                resized_img.save(buffer, format='JPEG', quality=85, optimize=True)
+                compressed_size = buffer.tell()
+                
+                logger.debug(f"Resize {scale*100:.0f}% ({new_width}x{new_height}): {compressed_size} bytes")
+                
+                if compressed_size <= target_size:
+                    # Success! Save resized image
+                    with open(output_path, 'wb') as f:
+                        f.write(buffer.getvalue())
+                    
+                    reduction_pct = ((original_size - compressed_size) / original_size) * 100
+                    logger.info(f"Image compression successful with resize {scale*100:.0f}% at quality=85: {output_path} ({compressed_size} bytes, {reduction_pct:.1f}% reduction)")
+                    return output_path
+            
+            # If we reach here, even aggressive resizing didn't work
+            logger.error(f"Failed to compress image under {target_size} bytes even with aggressive resizing")
+            
+            # Save the most compressed version we have as a last resort
+            resized_img = img.resize((int(original_dimensions[0] * 0.5), int(original_dimensions[1] * 0.5)), Image.LANCZOS)
+            resized_img.save(output_path, format='JPEG', quality=min_quality, optimize=True)
+            
+            final_size = os.path.getsize(output_path)
+            logger.warning(f"Saved heavily compressed image: {output_path} ({final_size} bytes) - may still exceed Telegram limit")
+            return output_path
+            
+    except Exception as e:
+        logger.error(f"Error during image compression for {input_path}: {e}")
+        # Clean up any partial output file
+        if output_path and os.path.exists(output_path) and output_path != input_path:
+            try:
+                os.remove(output_path)
+                logger.debug(f"Cleaned up partial compression file: {output_path}")
+            except Exception as cleanup_e:
+                logger.warning(f"Failed to clean up partial file {output_path}: {cleanup_e}")
+        return None
+
+
+def is_telegram_photo_size_error(error_message: str) -> bool:
+    """
+    Check if an error message indicates Telegram's 10MB photo upload limit was exceeded.
+    
+    Args:
+        error_message: The error message string to check
+    
+    Returns:
+        True if the error is about photo size exceeding 10MB, False otherwise
+    """
+    if not error_message:
+        return False
+    
+    error_lower = str(error_message).lower()
+    
+    # Check for the specific error message from Telegram
+    indicators = [
+        'cannot be saved by telegram',
+        'exceeds 10mb',
+        '10 mb',
+        'photo you tried to send',
+        'uploadmediarequest'
+    ]
+    
+    # Must contain at least 2 of these indicators to be considered a photo size error
+    matches = sum(1 for indicator in indicators if indicator in error_lower)
+    
+    return matches >= 2

@@ -361,10 +361,50 @@ async def watcher(event):
         msg = event.message
         text = msg.message or ''
         
+        # Get sender information for validation and logging
+        sender = await event.get_sender()
+        sender_username = getattr(sender, 'username', None)
+        sender_id = getattr(sender, 'id', None)
+        sender_name = getattr(sender, 'first_name', 'Unknown')
+        
+        # Create sender identifier for logging
+        if sender_username:
+            sender_identifier = f"@{sender_username}"
+        else:
+            sender_identifier = f"{sender_name} (ID: {sender_id})"
+        
         # Check if we're waiting for login input (phone/code/password)
+        # Login messages are allowed from self (saved messages) during authentication
         if login_state['waiting_for'] and event.is_private:
             await handle_login_response(event)
             return
+        
+        # CRITICAL SECURITY CHECK: Only process messages from the configured account_b_username
+        # This prevents unauthorized users from triggering downloads, uploads, or commands
+        from config import config
+        target_username = config.target_username.lstrip('@').lower()  # Remove @ prefix and normalize
+        
+        # Normalize sender username for comparison
+        sender_username_normalized = sender_username.lower() if sender_username else None
+        
+        # Check if sender matches the configured target user
+        is_authorized = (sender_username_normalized == target_username)
+        
+        if not is_authorized:
+            # Log unauthorized access attempt with full details for security auditing
+            logger.warning(
+                f"SECURITY: Unauthorized message from {sender_identifier} blocked. "
+                f"Expected: @{target_username}. "
+                f"Message preview: {text[:50] if text else '[file/media]'}..."
+            )
+            # Silently ignore unauthorized messages (no reply to avoid spam)
+            return
+        
+        # Log authorized message for debugging (only first 100 chars to avoid log spam)
+        logger.info(
+            f"Processing message from authorized user {sender_identifier}: "
+            f"{text[:100] if text else '[file/media]'}..."
+        )
         
         # Handle commands
         if text.startswith('/'):

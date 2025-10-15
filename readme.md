@@ -31,6 +31,67 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Battery Monitoring**: Built-in battery status monitoring for Termux users.
 - **Compression Timeout Control**: Configurable timeout settings for video compression operations.
 - **System Resource Monitoring**: Real-time CPU, memory, and disk usage tracking.
+- **Sender Validation & Security**: **NEW: Only processes messages from the configured `account_b_username`, preventing unauthorized access.** All messages from other users are blocked and logged for security auditing. This ensures that only your designated target user can trigger downloads, uploads, and commands.
+
+## Security
+
+### Authorized User Access Control
+
+The bot implements **comprehensive sender validation** to ensure security and prevent unauthorized access:
+
+#### How It Works:
+- **Single Authorized User**: Only messages from the configured `account_b_username` in `secrets.properties` are processed
+- **All Features Protected**: Commands, file uploads, Torbox links, and all bot operations require authorization
+- **Automatic Blocking**: Messages from unauthorized users are silently ignored (no reply to prevent spam)
+- **Security Logging**: All unauthorized access attempts are logged with sender details for auditing
+
+#### What's Protected:
+- ✅ **Commands**: `/help`, `/status`, `/queue`, `/pass`, and all other commands
+- ✅ **Archive Downloads**: ZIP, RAR, 7Z, TAR files
+- ✅ **Direct Media Uploads**: Images and videos  
+- ✅ **Torbox CDN Links**: Automatic link detection and downloads
+- ✅ **Password-Protected Archives**: Password input handling
+- ✅ **Queue Management**: All queue operations and status checks
+- ✅ **Configuration Changes**: Dynamic setting updates
+
+#### Authorization Logic:
+```
+Message Received → Check Sender Username
+                       ↓
+    ┌──────────────────┴──────────────────┐
+    ↓                                     ↓
+Matches account_b_username           Different User
+    ↓                                     ↓
+✅ Process Message                    ❌ Block & Log
+```
+
+#### Security Logging:
+**Unauthorized Access Attempt:**
+```
+WARNING: SECURITY: Unauthorized message from @unauthorized_user blocked. 
+Expected: @your_target_username. Message preview: [file/media]...
+```
+
+**Authorized Access:**
+```
+INFO: Processing message from authorized user @your_target_username: /help...
+```
+
+#### Configuration:
+Set your authorized user in `secrets.properties`:
+```ini
+ACCOUNT_B_USERNAME=@your_telegram_username
+```
+
+The username comparison is **case-insensitive** and automatically handles the `@` prefix, so `@YourUser`, `@youruser`, and `youruser` all work correctly.
+
+#### Edge Cases Handled:
+- ✅ Users without usernames (ID-only accounts) are blocked
+- ✅ Case-insensitive username matching
+- ✅ Automatic `@` prefix handling
+- ✅ Empty or malformed usernames are blocked
+
+This security feature prevents incidents where messages from unintended users (contacts, group chats, etc.) could trigger bot actions like downloads or uploads.
 
 ## Prerequisites
 

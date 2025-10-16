@@ -1127,7 +1127,15 @@ class QueueManager:
             from .media_processing import is_telegram_photo_size_error, compress_image_for_telegram
             from .constants import PHOTO_EXTENSIONS
             
-            if is_telegram_photo_size_error(error_message) and media_type == 'Images':
+            # Check if task was already compressed to avoid infinite loops
+            already_compressed = task.get('compressed', False)
+            
+            # Debug logging
+            is_size_error = is_telegram_photo_size_error(error_message)
+            logger.info(f"🔍 DEBUG: is_telegram_photo_size_error={is_size_error}, media_type={media_type}, already_compressed={already_compressed}")
+            logger.info(f"🔍 DEBUG: Error message snippet: {error_message[:200]}")
+            
+            if is_telegram_photo_size_error(error_message) and media_type == 'images' and not already_compressed:
                 logger.warning(f"🖼️ Detected Telegram 10MB photo size limit error for {filename}")
                 logger.info(f"🔧 Attempting to compress {len(existing_files)} images to under 10MB...")
                 
@@ -1155,10 +1163,11 @@ class QueueManager:
                     
                     logger.info(f"🗜️ Compressing image {i}/{len(existing_files)}: {os.path.basename(file_path)} ({file_size / (1024*1024):.2f} MB)")
                     
-                    # Notify user about compression progress (if upload_msg is available)
-                    if 'upload_msg' in locals() and upload_msg and i % 5 == 0:  # Update every 5 images
+                    # Notify user about compression progress every 5 images
+                    if event and hasattr(event, 'reply') and i % 5 == 0:
                         try:
-                            await upload_msg.edit(f"🗜️ Compressing images: {i}/{len(existing_files)}...")
+                            # Try to send a new message (can't edit upload_msg from here)
+                            await event.reply(f"🗜️ Compressing images: {i}/{len(existing_files)}...")
                         except Exception:
                             pass
                     

@@ -726,8 +726,14 @@ class QueueManager:
         
         if not file_path or not os.path.exists(file_path):
             logger.error(f"Upload task file not found: {file_path}")
-            if event:
-                await event.reply(f"❌ File not found: {filename}")
+            # Only reply if event is a valid Telethon event object with reply method
+            if event and hasattr(event, 'reply') and callable(getattr(event, 'reply')):
+                try:
+                    await event.reply(f"❌ File not found: {filename}")
+                except Exception as e:
+                    logger.warning(f"Failed to reply to event for missing file {filename}: {e}")
+            else:
+                logger.info(f"❌ File not found: {filename} (no valid event to reply to)")
             return
             
         try:
@@ -740,8 +746,12 @@ class QueueManager:
             
             # Notify start of upload (only for active uploads with valid event)
             upload_msg = None
-            if event and hasattr(event, 'reply'):
-                upload_msg = await event.reply(f'📤 Uploading {filename}...')
+            if event and hasattr(event, 'reply') and callable(getattr(event, 'reply')):
+                try:
+                    upload_msg = await event.reply(f'📤 Uploading {filename}...')
+                except Exception as e:
+                    logger.warning(f"Failed to send upload notification for {filename}: {e}")
+                    upload_msg = None
             else:
                 logger.info(f"📤 Uploading {filename}... (background task)")
             
@@ -760,7 +770,10 @@ class QueueManager:
                         compressed_path = base_path + '_compressed' + ext
                     
                     if upload_msg:
-                        await upload_msg.edit(f"🎬 Processing video: {filename}...")
+                        try:
+                            await upload_msg.edit(f"🎬 Processing video: {filename}...")
+                        except Exception as e:
+                            logger.warning(f"Failed to update upload status message: {e}")
                     else:
                         logger.info(f"🎬 Processing video: {filename}...")
                     
@@ -816,7 +829,10 @@ class QueueManager:
             })
             
             if upload_msg:
-                await upload_msg.edit(f"✅ Upload completed: {filename}")
+                try:
+                    await upload_msg.edit(f"✅ Upload completed: {filename}")
+                except Exception as e:
+                    logger.warning(f"Failed to update completion status message: {e}")
             logger.info(f"Upload completed successfully: {filename}")
             
             # Clean up file only on successful upload
@@ -969,8 +985,12 @@ class QueueManager:
             
             # Notify start of upload
             upload_msg = None
-            if event and hasattr(event, 'reply'):
-                upload_msg = await event.reply(f'📤 Uploading {len(existing_files)} {media_type}...')
+            if event and hasattr(event, 'reply') and callable(getattr(event, 'reply')):
+                try:
+                    upload_msg = await event.reply(f'📤 Uploading {len(existing_files)} {media_type}...')
+                except Exception as e:
+                    logger.warning(f"Failed to send upload notification: {e}")
+                    upload_msg = None
             else:
                 logger.info(f"📤 Uploading {len(existing_files)} {media_type}... (background task)")
             
@@ -991,7 +1011,10 @@ class QueueManager:
                         compressed_path = base_path + '_compressed' + ext
                     
                     if upload_msg:
-                        await upload_msg.edit(f"🎬 Processing {len(processed_files)+1}/{len(existing_files)} videos...")
+                        try:
+                            await upload_msg.edit(f"🎬 Processing {len(processed_files)+1}/{len(existing_files)} videos...")
+                        except Exception as e:
+                            logger.warning(f"Failed to update video processing status: {e}")
                     
                     compressed_result = await compress_video_for_telegram(file_path, compressed_path)
                     if compressed_result and os.path.exists(compressed_result):
@@ -1010,16 +1033,88 @@ class QueueManager:
                     # Use file as-is
                     processed_files.append(file_path)
             
+            # Validate files before upload
+            validated_files = []
+            for file_path in processed_files:
+                if not os.path.exists(file_path):
+                    logger.warning(f"⚠️ File missing before upload: {file_path}")
+                    continue
+                
+                # Check file size
+                try:
+                    file_size = os.path.getsize(file_path)
+                    if file_size == 0:
+                        logger.warning(f"⚠️ Zero-size file skipped: {file_path}")
+                        continue
+                    if file_size > 2000 * 1024 * 1024:  # 2GB Telegram limit
+                        logger.warning(f"⚠️ File too large for Telegram: {file_path} ({file_size} bytes)")
+                        continue
+                except OSError as e:
+                    logger.warning(f"⚠️ Cannot access file: {file_path} - {e}")
+                    continue
+                
+                validated_files.append(file_path)
+            
+            if not validated_files:
+                logger.error(f"❌ No valid files to upload for {filename}")
+                return
+            
             # Upload as grouped album
             caption = f"📦 From: {source_archive}" if source_archive else ""
             
             if upload_msg:
-                await upload_msg.edit(f'📤 Uploading {len(processed_files)} {media_type} as album...')
+                try:
+                    await upload_msg.edit(f'📤 Uploading {len(validated_files)} {media_type} as album...')
+                except Exception as e:
+                    logger.warning(f"Failed to update album upload status: {e}")
             
-            await telegram_ops.upload_media_grouped(target, processed_files, caption=caption)
+            try:
+                await telegram_ops.upload_media_grouped(target, validated_files, caption=caption)
+                upload_success = True
+                logger.info(f"✅ Grouped upload successful: {len(validated_files)} {media_type} files")
+            except Exception as upload_error:
+                upload_success = False
+                error_msg = str(upload_error).lower()
+                
+                logger.error(f"❌ Grouped upload failed for {filename}: {upload_error}")
+                
+                # Check for specific error types
+                if "invalid" in error_msg and "media object" in error_msg:
+                    logger.warning(f"🔍 Invalid media error detected - files may be corrupted or incompatible")
+                    logger.info(f"📝 Problematic files: {[os.path.basename(f) for f in validated_files]}")
+                    
+                    # Try to identify problematic files by extension
+                    problematic_extensions = set()
+                    for file_path in validated_files:
+                        ext = os.path.splitext(file_path)[1].lower()
+                        problematic_extensions.add(ext)
+                    logger.info(f"📊 File types in failed upload: {list(problematic_extensions)}")
+                
+                # Attempt individual uploads as fallback
+                logger.warning(f"🔄 Attempting individual uploads as fallback for {filename}")
+                individual_success_count = 0
+                
+                for file_path in validated_files:
+                    try:
+                        await telegram_ops.upload_media_file(target, file_path, caption=f"📦 From: {source_archive}")
+                        individual_success_count += 1
+                        logger.info(f"✅ Individual upload successful: {os.path.basename(file_path)}")
+                    except Exception as individual_error:
+                        logger.error(f"❌ Individual upload failed for {os.path.basename(file_path)}: {individual_error}")
+                
+                if individual_success_count > 0:
+                    logger.info(f"📊 Fallback complete: {individual_success_count}/{len(validated_files)} files uploaded individually")
+                    upload_success = True
+                else:
+                    logger.error(f"❌ All upload attempts failed for {filename}")
+                    raise upload_error
+            
+            if not upload_success:
+                return
             
             # Update cache for all files
-            for file_path in processed_files:
+            cache_files = validated_files if upload_success else []
+            for file_path in cache_files:
                 try:
                     from .file_operations import compute_sha256
                     file_hash = compute_sha256(file_path)
@@ -1035,17 +1130,30 @@ class QueueManager:
                     logger.warning(f"Could not update cache for {file_path}: {e}")
             
             if upload_msg:
-                await upload_msg.edit(f"✅ Uploaded {len(processed_files)} {media_type}")
+                try:
+                    await upload_msg.edit(f"✅ Uploaded {len(cache_files)} {media_type}")
+                except Exception as e:
+                    logger.warning(f"Failed to update completion status: {e}")
             logger.info(f"Grouped upload completed successfully: {filename}")
             
-            # Clean up all files
-            for file_path in processed_files:
+            # Clean up uploaded files
+            for file_path in cache_files:
                 try:
                     if os.path.exists(file_path):
                         os.remove(file_path)
                         logger.debug(f"Cleaned up file: {file_path}")
                 except Exception as e:
                     logger.warning(f"Failed to clean up file {file_path}: {e}")
+            
+            # Clean up any remaining processed files that weren't uploaded
+            for file_path in processed_files:
+                if file_path not in cache_files:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            logger.debug(f"Cleaned up unuploaded file: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up unuploaded file {file_path}: {e}")
             
             # Clean up any original files that weren't in processed list
             for file_path in existing_files:

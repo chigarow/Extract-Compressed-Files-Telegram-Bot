@@ -33,7 +33,8 @@ from .command_handlers import (
     handle_toggle_fast_download_command, handle_toggle_wifi_only_command, 
     handle_toggle_transcoding_command, handle_compression_timeout_command, handle_help_command, 
     handle_battery_status_command, handle_status_command, handle_queue_command, 
-    handle_cancel_password, handle_cancel_extraction, handle_cancel_process
+    handle_cancel_password, handle_cancel_extraction, handle_cancel_process,
+    handle_cleanup_command, handle_confirm_cleanup_command, handle_cleanup_orphans_command
 )
 from .torbox_downloader import (
     is_torbox_link, extract_torbox_links, get_filename_from_url, extract_file_id_from_url,
@@ -54,6 +55,7 @@ __all__ = [
     'handle_toggle_transcoding_command', 'handle_compression_timeout_command', 'handle_help_command', 
     'handle_battery_status_command', 'handle_status_command', 'handle_queue_command', 
     'handle_cancel_password', 'handle_cancel_extraction', 'handle_cancel_process',
+    'handle_cleanup_command', 'handle_confirm_cleanup_command', 'handle_cleanup_orphans_command',
     'is_torbox_link', 'extract_torbox_links', 'get_filename_from_url', 'extract_file_id_from_url',
     'download_from_torbox', 'download_torbox_with_progress', 'detect_file_type_from_url', 'get_torbox_metadata'
 ]

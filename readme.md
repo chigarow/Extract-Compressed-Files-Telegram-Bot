@@ -33,6 +33,9 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **Compression Timeout Control**: Configurable timeout settings for video compression operations.
 - **System Resource Monitoring**: Real-time CPU, memory, and disk usage tracking.
 - **Sender Validation & Security**: **NEW: Only processes messages from the configured `account_b_username`, preventing unauthorized access.** All messages from other users are blocked and logged for security auditing. This ensures that only your designated target user can trigger downloads, uploads, and commands.
+- **Automatic File Cleanup**: **NEW: Manual cleanup commands to remove old files and orphaned directories, recovering disk space.** Includes safety confirmations and protected file lists. See [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md) for details.
+- **Organized File Structure**: **NEW: Dedicated `data/torbox/` directory for all Torbox downloads, keeping the main data directory clean and organized.**
+- **System Monitoring Tools**: **NEW: Built-in monitoring script (`monitor_system.py`) provides detailed reports on disk usage, old files, and cleanup recommendations.**
 
 ## Security
 
@@ -613,6 +616,9 @@ The script supports a comprehensive set of commands for configuration and monito
 - **`/cancel-password`** - Cancel password input
 - **`/cancel-extraction`** - Cancel current extraction
 - **`/cancel-process`** - Cancel entire process and cleanup
+- **`/cleanup [hours]`** - Remove old files (default: 24 hours) **NEW**
+- **`/cleanup-orphans`** - Remove orphaned extraction directories **NEW**
+- **`/confirm-cleanup`** - Confirm pending cleanup operation **NEW**
 - **`/max_concurrent <number>`** - Set max concurrent downloads
 - **`/set_max_archive_gb <number>`** - Set max archive size limit
 - **`/toggle_fast_download`** - Enable/disable FastTelethon acceleration

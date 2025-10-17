@@ -69,7 +69,8 @@ from utils import (
     handle_toggle_fast_download_command, handle_toggle_wifi_only_command, 
     handle_toggle_transcoding_command, handle_compression_timeout_command, handle_help_command, 
     handle_battery_status_command, handle_status_command, handle_queue_command, handle_cancel_password,
-    handle_cancel_extraction, handle_cancel_process
+    handle_cancel_extraction, handle_cancel_process, handle_cleanup_command, 
+    handle_confirm_cleanup_command, handle_cleanup_orphans_command
 )
 
 # Bot start time
@@ -266,8 +267,9 @@ async def handle_torbox_link(event, torbox_url: str):
         file_type = detect_file_type_from_url(torbox_url)
         logger.info(f"Detected Torbox file type: {file_type} for {filename}")
         
-        # Prepare output path
-        temp_path = os.path.join(DATA_DIR, filename)
+        # Prepare output path in dedicated Torbox directory
+        from utils.constants import TORBOX_DIR
+        temp_path = os.path.join(TORBOX_DIR, filename)
         
         # Send initial message
         status_msg = await event.reply(f'🔗 Detected Torbox link!\n📥 Starting download: {filename}')
@@ -287,7 +289,7 @@ async def handle_torbox_link(event, torbox_url: str):
         
         # Update temp_path if filename changed
         if actual_filename and actual_filename != filename:
-            temp_path = os.path.join(DATA_DIR, actual_filename)
+            temp_path = os.path.join(TORBOX_DIR, actual_filename)
             logger.info(f"Using actual filename from API: {actual_filename}")
         
         # Get actual filename after download
@@ -449,6 +451,15 @@ async def watcher(event):
             elif command == '/compression-timeout' and len(parts) > 1:
                 value = ' '.join(parts[1:])
                 await handle_compression_timeout_command(event, value)
+            elif command == '/cleanup':
+                if len(parts) > 1:
+                    await handle_cleanup_command(event, parts[1])
+                else:
+                    await handle_cleanup_command(event)
+            elif command == '/cleanup-orphans':
+                await handle_cleanup_orphans_command(event)
+            elif command == '/confirm-cleanup':
+                await handle_confirm_cleanup_command(event)
             else:
                 await event.reply(f'❌ Unknown command: {command}\n\nUse /help to see available commands.')
             return

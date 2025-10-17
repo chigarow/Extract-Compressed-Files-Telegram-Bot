@@ -8,6 +8,7 @@ from config import config
 # Base directories
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
+TORBOX_DIR = os.path.join(DATA_DIR, 'torbox')
 
 # File extensions
 ARCHIVE_EXTENSIONS = ('.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz')
@@ -52,8 +53,9 @@ UPLOAD_QUEUE_FILE = os.path.join(DATA_DIR, 'upload_queue.json')
 CURRENT_PROCESS_FILE = os.path.join(DATA_DIR, 'current_process.json')
 FAILED_OPERATIONS_FILE = os.path.join(DATA_DIR, 'failed_operations.json')
 
-# Ensure data directory exists
+# Ensure data directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(TORBOX_DIR, exist_ok=True)
 
 # Progress reporting settings
 MIN_PCT_STEP = 5

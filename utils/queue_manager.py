@@ -1811,9 +1811,19 @@ class QueueManager:
         try:
             # Create extraction directory
             import time
-            extract_path = os.path.join(os.path.dirname(temp_archive_path), f'extracted_{filename}_{int(time.time())}')
+            from .constants import TORBOX_DIR
+            
+            # Check if this is a Torbox file (file exists in TORBOX_DIR)
+            is_torbox_file = temp_archive_path and TORBOX_DIR in temp_archive_path
+            base_dir = os.path.dirname(temp_archive_path) if temp_archive_path else TORBOX_DIR
+            
+            extract_path = os.path.join(base_dir, f'extracted_{filename}_{int(time.time())}')
             os.makedirs(extract_path, exist_ok=True)
-            logger.info(f"Created extraction directory: {extract_path}")
+            
+            if is_torbox_file:
+                logger.info(f"🗂️ Created Torbox extraction directory: {extract_path}")
+            else:
+                logger.info(f"Created extraction directory: {extract_path}")
             
             # Extract the archive using extract_archive_async
             from .file_operations import extract_archive_async
@@ -2164,6 +2174,94 @@ class QueueManager:
             logger.error(f"Error creating individual upload fallback: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
 
+    def cleanup_old_files(self, max_age_hours: float = 24) -> int:
+        """Clean up old files and directories from the data directory.
+        
+        Args:
+            max_age_hours: Maximum age in hours for files to keep
+            
+        Returns:
+            Number of files removed
+        """
+        from .constants import DATA_DIR
+        import shutil
+        
+        removed_count = 0
+        cutoff_time = time.time() - (max_age_hours * 3600)
+        
+        try:
+            for root, dirs, files in os.walk(DATA_DIR):
+                # Skip hidden directories and torbox directory
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'torbox']
+                
+                for file in files:
+                    if file.startswith('.'):
+                        continue
+                        
+                    file_path = os.path.join(root, file)
+                    try:
+                        if os.path.getmtime(file_path) < cutoff_time:
+                            file_size = os.path.getsize(file_path)
+                            os.remove(file_path)
+                            removed_count += 1
+                            logger.info(f"🗑️ Removed old file: {file} ({file_size / 1024 / 1024:.1f}MB)")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to remove {file_path}: {e}")
+                        
+        except Exception as e:
+            logger.error(f"❌ Error during file cleanup: {e}")
+            
+        return removed_count
+
+    def cleanup_failed_upload_files(self) -> list:
+        """Clean up orphaned extraction directories that are no longer being processed.
+        
+        Returns:
+            List of removed directory paths
+        """
+        from .constants import DATA_DIR
+        import shutil
+        
+        removed_dirs = []
+        
+        try:
+            # Look for extraction directories that match the pattern
+            for item in os.listdir(DATA_DIR):
+                item_path = os.path.join(DATA_DIR, item)
+                
+                # Check for extraction directories (contain extracted files)
+                if (os.path.isdir(item_path) and 
+                    not item.startswith('.') and 
+                    item != 'torbox' and
+                    ('extract' in item.lower() or '_files' in item or len(item) > 20)):
+                    
+                    try:
+                        # Check if directory has any recent activity
+                        latest_time = 0
+                        for root, dirs, files in os.walk(item_path):
+                            for file in files:
+                                file_path = os.path.join(root, file)
+                                latest_time = max(latest_time, os.path.getmtime(file_path))
+                        
+                        # If no recent activity (older than 1 hour), consider it orphaned
+                        if latest_time < time.time() - 3600:  # 1 hour
+                            dir_size = sum(os.path.getsize(os.path.join(dirpath, filename))
+                                         for dirpath, dirnames, filenames in os.walk(item_path)
+                                         for filename in filenames)
+                            size_mb = dir_size / (1024 * 1024)
+                            
+                            shutil.rmtree(item_path)
+                            removed_dirs.append(item_path)
+                            logger.info(f"🗑️ Removed orphaned directory: {item} ({size_mb:.1f}MB)")
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to clean up {item_path}: {e}")
+                        
+        except Exception as e:
+            logger.error(f"❌ Error during directory cleanup: {e}")
+            
+        return removed_dirs
+
 
 class ProcessingQueue:
     """Manages the main processing queue for extracted files."""
@@ -2283,8 +2381,17 @@ class ProcessingQueue:
             raise FileNotFoundError(f"Archive file not found: {temp_archive_path}")
         
         # Create extraction directory
-        extract_path = os.path.join(os.path.dirname(temp_archive_path), f'extracted_{filename}_{int(time.time())}')
+        from .constants import TORBOX_DIR
+        
+        # Check if this is a Torbox file (file exists in TORBOX_DIR)
+        is_torbox_file = temp_archive_path and TORBOX_DIR in temp_archive_path
+        base_dir = os.path.dirname(temp_archive_path) if temp_archive_path else TORBOX_DIR
+        
+        extract_path = os.path.join(base_dir, f'extracted_{filename}_{int(time.time())}')
         os.makedirs(extract_path, exist_ok=True)
+        
+        if is_torbox_file:
+            logger.info(f"🗂️ Creating Torbox extraction directory: {extract_path}")
         
         try:
             # Update status
@@ -2366,6 +2473,157 @@ class ProcessingQueue:
     def get_queue_size(self) -> int:
         """Get current processing queue size."""
         return self.processing_queue.qsize()
+
+    async def cleanup_old_files(self, max_age_hours: int = 24, dry_run: bool = False):
+        """
+        Clean up old extraction directories and leftover files.
+        
+        Args:
+            max_age_hours: Remove files older than this many hours (default 24)
+            dry_run: If True, only log what would be deleted without actually deleting
+        """
+        import time
+        import shutil
+        from .constants import DATA_DIR, TORBOX_DIR
+        
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+        
+        # Directories to clean
+        cleanup_dirs = [DATA_DIR, TORBOX_DIR]
+        total_cleaned = 0
+        total_size_cleaned = 0
+        
+        logger.info(f"🧹 Starting cleanup of files older than {max_age_hours} hours...")
+        
+        for base_dir in cleanup_dirs:
+            if not os.path.exists(base_dir):
+                continue
+                
+            dir_type = "Torbox" if base_dir == TORBOX_DIR else "Main"
+            logger.info(f"🔍 Scanning {dir_type} directory: {base_dir}")
+            
+            try:
+                for item in os.listdir(base_dir):
+                    item_path = os.path.join(base_dir, item)
+                    
+                    # Skip essential files
+                    if item.endswith(('.json', '.log', '.session')) or item == 'torbox':
+                        continue
+                    
+                    try:
+                        # Get file/directory age
+                        stat_info = os.stat(item_path)
+                        age_seconds = current_time - stat_info.st_mtime
+                        
+                        if age_seconds > max_age_seconds:
+                            # Calculate size
+                            if os.path.isdir(item_path):
+                                size = sum(os.path.getsize(os.path.join(dirpath, filename))
+                                         for dirpath, dirnames, filenames in os.walk(item_path)
+                                         for filename in filenames)
+                                item_type = "directory"
+                            else:
+                                size = stat_info.st_size
+                                item_type = "file"
+                            
+                            age_hours = age_seconds / 3600
+                            size_mb = size / (1024 * 1024)
+                            
+                            if dry_run:
+                                logger.info(f"🗑️ Would delete {item_type}: {item} (age: {age_hours:.1f}h, size: {size_mb:.1f}MB)")
+                            else:
+                                try:
+                                    if os.path.isdir(item_path):
+                                        shutil.rmtree(item_path)
+                                    else:
+                                        os.remove(item_path)
+                                    
+                                    logger.info(f"✅ Deleted {item_type}: {item} (age: {age_hours:.1f}h, size: {size_mb:.1f}MB)")
+                                    total_cleaned += 1
+                                    total_size_cleaned += size
+                                    
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Failed to delete {item}: {e}")
+                        
+                    except (OSError, FileNotFoundError) as e:
+                        logger.warning(f"⚠️ Could not access {item}: {e}")
+                        
+            except Exception as e:
+                logger.error(f"❌ Error scanning directory {base_dir}: {e}")
+        
+        if dry_run:
+            logger.info(f"🧹 Cleanup dry run completed")
+        else:
+            size_mb = total_size_cleaned / (1024 * 1024)
+            logger.info(f"🧹 Cleanup completed: {total_cleaned} items removed, {size_mb:.1f}MB freed")
+
+    async def cleanup_failed_upload_files(self):
+        """Clean up files that failed to upload and are stuck in the system."""
+        from .constants import TORBOX_DIR, DATA_DIR
+        
+        # Get list of files in upload queue to avoid deleting active files
+        active_files = set()
+        
+        # Check upload queue for active files
+        upload_items = list(self.upload_persistent.get_items())
+        for item in upload_items:
+            file_path = item.get('file_path')
+            file_paths = item.get('file_paths', [])
+            
+            if file_path:
+                active_files.add(file_path)
+            for fp in file_paths:
+                active_files.add(fp)
+        
+        logger.info(f"🔍 Found {len(active_files)} active files in upload queue")
+        
+        # Look for orphaned extraction directories
+        orphaned_dirs = []
+        for base_dir in [DATA_DIR, TORBOX_DIR]:
+            if not os.path.exists(base_dir):
+                continue
+                
+            for item in os.listdir(base_dir):
+                item_path = os.path.join(base_dir, item)
+                
+                if os.path.isdir(item_path) and item.startswith('extracted_'):
+                    # Check if any files in this directory are in active queue
+                    has_active_files = False
+                    
+                    try:
+                        for root, dirs, files in os.walk(item_path):
+                            for file in files:
+                                file_path = os.path.join(root, file)
+                                if file_path in active_files:
+                                    has_active_files = True
+                                    break
+                            if has_active_files:
+                                break
+                    except Exception:
+                        continue
+                    
+                    if not has_active_files:
+                        orphaned_dirs.append(item_path)
+        
+        if orphaned_dirs:
+            logger.info(f"🗑️ Found {len(orphaned_dirs)} orphaned extraction directories")
+            
+            for dir_path in orphaned_dirs:
+                try:
+                    import shutil
+                    dir_size = sum(os.path.getsize(os.path.join(dirpath, filename))
+                                 for dirpath, dirnames, filenames in os.walk(dir_path)
+                                 for filename in filenames)
+                    size_mb = dir_size / (1024 * 1024)
+                    
+                    shutil.rmtree(dir_path)
+                    logger.info(f"✅ Cleaned up orphaned directory: {os.path.basename(dir_path)} ({size_mb:.1f}MB)")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to clean up {dir_path}: {e}")
+        else:
+            logger.info("✅ No orphaned extraction directories found")
     
     async def cancel_current_processing(self):
         """Cancel current processing task."""

@@ -1135,7 +1135,74 @@ class QueueManager:
             logger.info(f"🔍 DEBUG: is_telegram_photo_size_error={is_size_error}, media_type={media_type}, already_compressed={already_compressed}")
             logger.info(f"🔍 DEBUG: Error message snippet: {error_message[:200]}")
             
-            if is_telegram_photo_size_error(error_message) and media_type == 'images' and not already_compressed:
+            # Check for invalid media object error (corrupted/unsupported files)
+            is_invalid_media_error = self._is_invalid_media_error(error_message)
+            logger.info(f"🔍 DEBUG: is_invalid_media_error={is_invalid_media_error}")
+            
+            if is_invalid_media_error and media_type == 'videos' and not task.get('validated', False):
+                logger.warning(f"📹 Detected invalid media object error for {filename}")
+                logger.info(f"🔧 Attempting to validate and fix {len(existing_files)} video files...")
+                
+                # Validate and attempt to fix video files
+                valid_files = []
+                
+                for i, file_path in enumerate(existing_files, 1):
+                    if not os.path.exists(file_path):
+                        logger.warning(f"File not found during validation: {file_path}")
+                        continue
+                    
+                    # Check file size (too small files are likely corrupted)
+                    file_size = os.path.getsize(file_path)
+                    logger.info(f"📊 Validating video {i}/{len(existing_files)}: {os.path.basename(file_path)} ({file_size} bytes)")
+                    
+                    # Skip suspiciously small video files (likely corrupted)
+                    if file_size < 1024 * 1024:  # Less than 1MB
+                        logger.error(f"❌ Video file too small (likely corrupted): {file_path} ({file_size} bytes)")
+                        logger.error(f"🗑️ Removing corrupted file: {file_path}")
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to remove corrupted file: {e}")
+                        continue
+                    
+                    # Validate video file format and metadata
+                    if await self._validate_video_file(file_path):
+                        valid_files.append(file_path)
+                        logger.info(f"✅ Video file validated: {os.path.basename(file_path)}")
+                    else:
+                        logger.error(f"❌ Video file validation failed: {file_path}")
+                        # Try to remove invalid file
+                        try:
+                            os.remove(file_path)
+                            logger.info(f"🗑️ Removed invalid video file: {file_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to remove invalid file: {e}")
+                
+                if valid_files:
+                    logger.info(f"✅ Found {len(valid_files)} valid video files out of {len(existing_files)}")
+                    
+                    # Retry with only valid files
+                    retry_task = task.copy()
+                    retry_task['file_paths'] = valid_files
+                    retry_task['retry_count'] = retry_count
+                    retry_task['retry_after'] = time.time() + 10  # Short delay
+                    retry_task['validated'] = True  # Mark as validated to avoid re-validation
+                    
+                    await self._add_to_retry_queue(retry_task)
+                    
+                    if event and hasattr(event, 'reply'):
+                        await event.reply(f'🔧 Validated {len(valid_files)} video files. Retrying upload...')
+                    
+                    logger.info(f"💾 Keeping {len(valid_files)} valid files for retry")
+                    return  # Exit early, retry will happen automatically
+                else:
+                    logger.error(f"❌ No valid video files found in {filename}")
+                    # Don't retry - all files are corrupted
+                    if event and hasattr(event, 'reply'):
+                        await event.reply(f'❌ All video files in {filename} are corrupted or invalid. Upload cancelled.')
+                    return
+            
+            elif is_telegram_photo_size_error(error_message) and media_type == 'images' and not already_compressed:
                 logger.warning(f"🖼️ Detected Telegram 10MB photo size limit error for {filename}")
                 logger.info(f"🔧 Attempting to compress {len(existing_files)} images to under 10MB...")
                 
@@ -1221,22 +1288,35 @@ class QueueManager:
                     # Fall through to normal retry logic
             
             if retry_count < MAX_RETRY_ATTEMPTS:
-                # Schedule retry with exponential backoff
-                retry_delay = RETRY_BASE_INTERVAL * (3 ** (retry_count - 1))
-                logger.info(f"Scheduling grouped upload retry for {filename} in {retry_delay}s")
-                
-                # Add to retry queue
-                retry_task = task.copy()
-                retry_task['retry_count'] = retry_count
-                retry_task['retry_after'] = time.time() + retry_delay
-                
-                await self._add_to_retry_queue(retry_task)
-                
-                if event and hasattr(event, 'reply'):
-                    await event.reply(f'⚠️ Upload failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
-                
-                # Keep files for retry
-                logger.info(f"Keeping {len(existing_files)} files for retry")
+                # For certain errors, try fallback to individual uploads after first retry
+                if retry_count >= 2 and (is_invalid_media_error or 'SendMultiMediaRequest' in error_message):
+                    logger.warning(f"🔄 Grouped upload failing repeatedly for {filename}. Trying individual uploads as fallback...")
+                    
+                    # Convert to individual upload tasks
+                    await self._fallback_to_individual_uploads(task, existing_files)
+                    
+                    if event and hasattr(event, 'reply'):
+                        await event.reply(f'🔄 Grouped upload failed. Trying individual file uploads for {filename}...')
+                    
+                    logger.info(f"💾 Converted grouped upload to {len(existing_files)} individual uploads")
+                    return
+                else:
+                    # Schedule retry with exponential backoff
+                    retry_delay = RETRY_BASE_INTERVAL * (3 ** (retry_count - 1))
+                    logger.info(f"Scheduling grouped upload retry for {filename} in {retry_delay}s")
+                    
+                    # Add to retry queue
+                    retry_task = task.copy()
+                    retry_task['retry_count'] = retry_count
+                    retry_task['retry_after'] = time.time() + retry_delay
+                    
+                    await self._add_to_retry_queue(retry_task)
+                    
+                    if event and hasattr(event, 'reply'):
+                        await event.reply(f'⚠️ Upload failed for {filename}. Retrying in {retry_delay}s... (attempt {retry_count + 1}/{MAX_RETRY_ATTEMPTS})')
+                    
+                    # Keep files for retry
+                    logger.info(f"Keeping {len(existing_files)} files for retry")
             else:
                 # Max retries reached - clean up files
                 logger.error(f"Grouped upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
@@ -1812,6 +1892,170 @@ class QueueManager:
         except Exception as e:
             logger.error(f"Error processing direct media for {filename}: {e}")
 
+    def _is_invalid_media_error(self, error_message: str) -> bool:
+        """Check if error message indicates invalid media object (corrupted/unsupported file)."""
+        if not error_message:
+            return False
+        
+        error_lower = str(error_message).lower()
+        
+        # Check for the specific invalid media error messages
+        indicators = [
+            'provided media object is invalid',
+            'media invalid',
+            'current account may not be able to send it',
+            'sendmultimediarequest',
+            'media object is invalid'
+        ]
+        
+        # Must contain at least 2 of these indicators to be considered invalid media error
+        matches = sum(1 for indicator in indicators if indicator in error_lower)
+        
+        return matches >= 2
+    
+    async def _validate_video_file(self, file_path: str) -> bool:
+        """Validate video file format and metadata."""
+        try:
+            import subprocess
+            import json
+            
+            # First check: basic file info
+            if not os.path.exists(file_path):
+                logger.error(f"Video file does not exist: {file_path}")
+                return False
+            
+            file_size = os.path.getsize(file_path)
+            if file_size < 1024:  # Less than 1KB is definitely corrupt
+                logger.error(f"Video file too small: {file_path} ({file_size} bytes)")
+                return False
+            
+            # Try to read first few bytes to check for valid file signature
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(16)
+                    if len(header) < 4:
+                        logger.error(f"Video file header too short: {file_path}")
+                        return False
+                    
+                    # Check for common video file signatures
+                    video_signatures = [
+                        b'\x00\x00\x00\x14ftypmp4',  # MP4
+                        b'\x00\x00\x00\x18ftypmp4',  # MP4
+                        b'\x00\x00\x00\x20ftypmp4',  # MP4
+                        b'ftyp',  # MOV/MP4 family
+                        b'\x1a\x45\xdf\xa3',  # MKV
+                        b'RIFF',  # AVI
+                    ]
+                    
+                    has_valid_signature = any(header.startswith(sig) or sig in header for sig in video_signatures)
+                    if not has_valid_signature:
+                        logger.warning(f"Video file has unknown signature: {file_path} - {header.hex()}")
+                        # Don't fail immediately - some formats may not be recognized
+            
+            except Exception as e:
+                logger.warning(f"Could not read video file header: {file_path} - {e}")
+                # Continue with other checks
+            
+            # Try ffprobe if available (more thorough check)
+            try:
+                result = subprocess.run([
+                    'ffprobe', '-v', 'quiet', '-print_format', 'json', 
+                    '-show_format', '-show_streams', file_path
+                ], capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    
+                    # Check if we have video streams
+                    if 'streams' in data:
+                        video_streams = [s for s in data['streams'] if s.get('codec_type') == 'video']
+                        if video_streams:
+                            logger.info(f"Video file validated with ffprobe: {file_path}")
+                            return True
+                        else:
+                            logger.error(f"No video streams found in file: {file_path}")
+                            return False
+                    else:
+                        logger.error(f"No streams found in video file: {file_path}")
+                        return False
+                else:
+                    logger.warning(f"ffprobe failed for {file_path}: {result.stderr}")
+                    # Fallback to basic validation
+            
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
+                logger.warning(f"ffprobe not available or failed for {file_path}: {e}")
+                # Fallback to basic validation
+            
+            # Basic validation fallback - check file extension and size
+            file_ext = os.path.splitext(file_path)[1].lower()
+            from .constants import VIDEO_EXTENSIONS
+            
+            if file_ext not in VIDEO_EXTENSIONS:
+                logger.error(f"Unsupported video extension: {file_path} ({file_ext})")
+                return False
+            
+            # If file is reasonably sized and has correct extension, assume it's valid
+            if file_size > 1024 * 100:  # At least 100KB
+                logger.info(f"Video file passed basic validation: {file_path}")
+                return True
+            else:
+                logger.error(f"Video file too small for basic validation: {file_path} ({file_size} bytes)")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error validating video file {file_path}: {e}")
+            return False
+
+    async def _fallback_to_individual_uploads(self, original_task: dict, file_paths: list):
+        """Fallback to individual uploads when grouped upload fails."""
+        try:
+            logger.info(f"🔄 Converting grouped upload to individual uploads: {len(file_paths)} files")
+            
+            archive_name = original_task.get('source_archive', '')
+            extraction_folder = original_task.get('extraction_folder', '')
+            event = original_task.get('event')
+            
+            # Create individual upload tasks for each file
+            individual_tasks = []
+            for file_path in file_paths:
+                if not os.path.exists(file_path):
+                    logger.warning(f"File not found for individual upload: {file_path}")
+                    continue
+                
+                filename = os.path.basename(file_path)
+                file_size = os.path.getsize(file_path)
+                
+                # Create hash for cache
+                from .file_operations import compute_sha256
+                file_hash = compute_sha256(file_path)
+                
+                individual_task = {
+                    'type': 'direct_media',
+                    'filename': filename,
+                    'file_path': file_path,
+                    'size_bytes': file_size,
+                    'file_hash': file_hash,
+                    'archive_name': archive_name,
+                    'extraction_folder': extraction_folder,
+                    'event': event,
+                    'is_grouped': False,  # Mark as individual upload
+                    'fallback_from_grouped': True,  # Mark as fallback
+                    'retry_count': 0  # Reset retry count for individual uploads
+                }
+                
+                individual_tasks.append(individual_task)
+                logger.debug(f"Created individual upload task: {filename}")
+            
+            # Add all individual tasks to upload queue
+            for task in individual_tasks:
+                await self.add_upload_task(task)
+            
+            logger.info(f"✅ Successfully created {len(individual_tasks)} individual upload tasks")
+            
+        except Exception as e:
+            logger.error(f"Error creating individual upload fallback: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
 
 class ProcessingQueue:
     """Manages the main processing queue for extracted files."""
@@ -1876,8 +2120,20 @@ class ProcessingQueue:
                 await self._process_archive_extraction(task)
             elif task_type == 'process_downloaded_file':
                 await self._process_downloaded_file(task)
+            elif task_type == 'grouped_media':
+                # Handle grouped media retry tasks - redirect to upload queue
+                logger.info(f"🔄 Redirecting grouped_media task {filename} to upload queue")
+                
+                # Get queue manager instance and add to upload queue
+                queue_mgr = get_queue_manager()
+                await queue_mgr.add_upload_task(task)
+                
+                logger.info(f"✅ Successfully redirected {filename} to upload queue for retry")
+                return
             else:
                 logger.warning(f"Unknown processing task type: {task_type}")
+                logger.warning(f"Task details: {task}")
+                return
                 
         except Exception as e:
             retry_count += 1

@@ -246,6 +246,7 @@ class QueueManager:
         self.retry_queue = []  # legacy structure used in some tests
         self.client = client  # optional injected client for tests
         self.is_processing = False  # legacy flag used by tests
+        self.active_uploads = 0  # tracks uploads currently executing
         
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
@@ -605,9 +606,13 @@ class QueueManager:
                 # Process with semaphore
                 logger.info(f"Acquiring upload semaphore for {filename}")
                 async with self.upload_semaphore:
-                    logger.info(f"Executing upload task for {filename}")
-                    await self._execute_upload_task(task)
-                    logger.info(f"Completed upload task for {filename}")
+                    self.active_uploads += 1
+                    try:
+                        logger.info(f"Executing upload task for {filename}")
+                        await self._execute_upload_task(task)
+                        logger.info(f"Completed upload task for {filename}")
+                    finally:
+                        self.active_uploads -= 1
                 
                 self.upload_queue.task_done()
                 logger.info(f"Marked upload task done for {filename}. Remaining queue size: {self.upload_queue.qsize()}")
@@ -1825,8 +1830,8 @@ class QueueManager:
         """Wait until the upload queue and worker are idle."""
         while True:
             queue_empty = self.upload_queue.qsize() == 0
-            processor_idle = self.upload_task is None or self.upload_task.done()
-            if queue_empty and processor_idle:
+            uploads_in_flight = self.active_uploads == 0
+            if queue_empty and uploads_in_flight:
                 return
             await asyncio.sleep(1)
 

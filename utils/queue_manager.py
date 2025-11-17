@@ -82,11 +82,12 @@ class ExtractionCleanupRegistry:
 class StreamingBatchBuilder:
     """Accumulates streaming entries and dispatches grouped uploads sequentially."""
 
-    def __init__(self, queue_manager, extractor, event, source_archive):
+    def __init__(self, queue_manager, extractor, event, source_archive, source_archive_path):
         self.queue_manager = queue_manager
         self.extractor = extractor
         self.event = event
         self.source_archive = source_archive
+        self.source_archive_path = source_archive_path
         self.buffers = {'images': [], 'videos': []}
         self.batch_counters = {'images': 0, 'videos': 0}
 
@@ -120,6 +121,7 @@ class StreamingBatchBuilder:
             'file_paths': [entry.temp_path for entry in entries],
             'filename': filename,
             'source_archive': self.source_archive,
+            'source_archive_path': self.source_archive_path,
             'is_grouped': True,
             'cleanup_file_paths': True,
             'streaming_manifest': self.extractor.manifest_path,
@@ -179,6 +181,57 @@ class BackwardsCompatibleQueue(asyncio.Queue):
         self.put_nowait(item)
 
 
+class ArchiveCleanupRegistry:
+    """Track original archive files that need cleanup after all upload batches are complete."""
+    
+    def __init__(self):
+        self.registry = {}  # source_archive_path -> {'total_batches': int, 'completed_batches': int}
+        self.lock = asyncio.Lock()
+    
+    async def register_archive(self, source_archive_path: str, total_batches: int):
+        """Register a new archive with the number of upload batches to expect."""
+        async with self.lock:
+            if total_batches == 0:
+                logger.info(f"No upload batches for {source_archive_path}, cleaning up immediately.")
+                self._cleanup_archive(source_archive_path)
+                return
+
+            self.registry[source_archive_path] = {
+                'total_batches': total_batches,
+                'completed_batches': 0
+            }
+            logger.info(f"Registered archive for cleanup: {source_archive_path} ({total_batches} batches)")
+    
+    async def mark_batch_completed(self, source_archive_path: str):
+        """Mark an upload batch as completed. If all batches are done, clean up the archive."""
+        async with self.lock:
+            if source_archive_path not in self.registry:
+                logger.warning(f"Attempted to mark batch for untracked archive: {source_archive_path}")
+                return
+            
+            self.registry[source_archive_path]['completed_batches'] += 1
+            completed = self.registry[source_archive_path]['completed_batches']
+            total = self.registry[source_archive_path]['total_batches']
+            
+            logger.info(f"Archive cleanup progress for {source_archive_path}: {completed}/{total} batches")
+            
+            if completed >= total:
+                logger.info(f"All batches for {source_archive_path} complete. Cleaning up archive.")
+                self._cleanup_archive(source_archive_path)
+                del self.registry[source_archive_path]
+
+    def _cleanup_archive(self, archive_path: str):
+        """Safely delete the archive file."""
+        try:
+            if os.path.exists(archive_path):
+                os.remove(archive_path)
+                logger.info(f"✅ Cleaned up archive: {archive_path}")
+            else:
+                logger.warning(f"Archive already removed: {archive_path}")
+        except Exception as e:
+            logger.error(f"Failed to clean up archive {archive_path}: {e}")
+
+
 class QueueManager:
     """Manages download and upload queues with persistent storage and concurrency control.
 
@@ -196,6 +249,7 @@ class QueueManager:
         
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
+        self.archive_cleanup_registry = ArchiveCleanupRegistry()
         
         logger.info("QueueManager initialized with backwards-compatible queues for legacy test support")
         
@@ -1241,6 +1295,11 @@ class QueueManager:
                     except Exception:
                         pass
             
+            # Notify the archive cleanup registry that a batch has been completed
+            source_archive_path = task.get('source_archive_path')
+            if source_archive_path:
+                await self.archive_cleanup_registry.mark_batch_completed(source_archive_path)
+
             # Check if we should clean up extraction folder
             extraction_folder = task.get('extraction_folder')
             if extraction_folder:
@@ -1891,6 +1950,7 @@ class QueueManager:
         filename = processing_task.get('filename', 'unknown')
         temp_archive_path = processing_task.get('temp_archive_path')
         event = processing_task.get('event')
+        extractor = None
 
         try:
             from .constants import MEDIA_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
@@ -1905,14 +1965,25 @@ class QueueManager:
                 check_interval=STREAMING_LOW_SPACE_CHECK_INTERVAL,
             )
 
-            batch_builder = StreamingBatchBuilder(self, extractor, event, filename)
+            # Get total files to calculate batches for cleanup tracking
+            total_images = extractor.get_total_files_by_type('images')
+            total_videos = extractor.get_total_files_by_type('videos')
+            
+            image_batches = (total_images + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES if total_images > 0 else 0
+            video_batches = (total_videos + TELEGRAM_ALBUM_MAX_FILES - 1) // TELEGRAM_ALBUM_MAX_FILES if total_videos > 0 else 0
+            total_batches = image_batches + video_batches
+            
+            logger.info(f"Calculated batches for {filename}: {image_batches} image batches, {video_batches} video batches. Total: {total_batches}")
+            
+            await self.archive_cleanup_registry.register_archive(temp_archive_path, total_batches)
+
+            batch_builder = StreamingBatchBuilder(self, extractor, event, filename, temp_archive_path)
 
             async for entry in extractor.stream_entries(event=event):
                 await batch_builder.add_entry(entry)
             
             await batch_builder.flush()
             
-            extractor.finalize()
             logger.info(f"✅ Streaming extraction and upload queuing completed for {filename}")
 
         except Exception as e:
@@ -1920,13 +1991,10 @@ class QueueManager:
             if event:
                 await event.reply(f"❌ Streaming extraction failed for {filename}: {e}")
         finally:
-            # Clean up the original archive
-            if os.path.exists(temp_archive_path):
-                try:
-                    os.remove(temp_archive_path)
-                    logger.info(f"Cleaned up archive: {temp_archive_path}")
-                except OSError as e:
-                    logger.warning(f"Failed to clean up archive {temp_archive_path}: {e}")
+            # Finalize and clean up the manifest, but not the archive itself.
+            # The archive is cleaned up by the ArchiveCleanupRegistry.
+            if extractor:
+                extractor.finalize()
 
     async def _process_extraction_and_upload(self, processing_task):
         """Process archive extraction and upload asynchronously without blocking download queue"""
@@ -2020,9 +2088,11 @@ class QueueManager:
             
             logger.info(f"📊 Will create {total_groups} upload groups (images: {num_image_groups}, videos: {num_video_groups})")
             
-            # Register extraction folder for cleanup tracking
+            # Register extraction folder for media file cleanup tracking
             await self.extraction_cleanup_registry.register_extraction(extract_path, total_groups)
-            
+            # Register the original archive for cleanup after all batches are uploaded
+            await self.archive_cleanup_registry.register_archive(temp_archive_path, total_groups)
+
             # Upload images in batches (max 10 per album due to Telegram limit)
             if image_files:
                 if len(image_files) > TELEGRAM_ALBUM_MAX_FILES:
@@ -2039,12 +2109,13 @@ class QueueManager:
                             'file_paths': batch_images,
                             'filename': f"{filename} - Images (Batch {batch_num}/{total_batches}: {len(batch_images)} files)",
                             'source_archive': filename,
+                            'source_archive_path': temp_archive_path,
                             'extraction_folder': extract_path,
                             'is_grouped': True,
+                            'retry_count': 0,
                             'batch_info': {'batch_num': batch_num, 'total_batches': total_batches}
                         }
                         await self.add_upload_task(upload_task)
-                        logger.info(f"📦 Queued image batch {batch_num}/{total_batches} for upload")
                 else:
                     upload_task = {
                         'type': 'grouped_media',
@@ -2053,12 +2124,14 @@ class QueueManager:
                         'file_paths': image_files,
                         'filename': f"{filename} - Images ({len(image_files)} files)",
                         'source_archive': filename,
+                        'source_archive_path': temp_archive_path,
                         'extraction_folder': extract_path,
-                        'is_grouped': True
+                        'is_grouped': True,
+                        'retry_count': 0
                     }
                     await self.add_upload_task(upload_task)
-            
-            # Upload videos in batches (max 10 per album due to Telegram limit)
+
+            # Upload videos in batches
             if video_files:
                 if len(video_files) > TELEGRAM_ALBUM_MAX_FILES:
                     logger.info(f"📊 Splitting {len(video_files)} videos into batches of {TELEGRAM_ALBUM_MAX_FILES}")
@@ -2074,12 +2147,13 @@ class QueueManager:
                             'file_paths': batch_videos,
                             'filename': f"{filename} - Videos (Batch {batch_num}/{total_batches}: {len(batch_videos)} files)",
                             'source_archive': filename,
+                            'source_archive_path': temp_archive_path,
                             'extraction_folder': extract_path,
                             'is_grouped': True,
+                            'retry_count': 0,
                             'batch_info': {'batch_num': batch_num, 'total_batches': total_batches}
                         }
                         await self.add_upload_task(upload_task)
-                        logger.info(f"📦 Queued video batch {batch_num}/{total_batches} for upload")
                 else:
                     upload_task = {
                         'type': 'grouped_media',
@@ -2088,23 +2162,23 @@ class QueueManager:
                         'file_paths': video_files,
                         'filename': f"{filename} - Videos ({len(video_files)} files)",
                         'source_archive': filename,
+                        'source_archive_path': temp_archive_path,
                         'extraction_folder': extract_path,
-                        'is_grouped': True
+                        'is_grouped': True,
+                        'retry_count': 0
                     }
-                await self.add_upload_task(upload_task)
-            
-            # Clean up the original archive
-            try:
-                if os.path.exists(temp_archive_path):
-                    os.remove(temp_archive_path)
-                    logger.info(f"Cleaned up archive: {temp_archive_path}")
-            except Exception as cleanup_e:
-                logger.warning(f"Could not clean up archive {temp_archive_path}: {cleanup_e}")
-                
+                    await self.add_upload_task(upload_task)
+        
         except Exception as e:
-            logger.error(f"Error processing extraction for {filename}: {e}")
+            logger.error(f"Error during extraction and upload processing for {filename}: {e}")
             import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
+            logger.error(traceback.format_exc())
+            if event:
+                await event.reply(f"❌ Error processing {filename}: {e}")
+        finally:
+            # The original archive is now cleaned up by the ArchiveCleanupRegistry
+            # after all its upload batches are completed.
+            pass
 
     async def _handle_extraction_failure(self, filename, error_msg, temp_archive_path, extract_path, event=None):
         """Notify the user about extraction failures and clean up artifacts."""

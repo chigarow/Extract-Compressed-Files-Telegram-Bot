@@ -108,6 +108,48 @@ class StreamingExtractor:
         else:
             raise RuntimeError('Streaming extraction currently supports ZIP archives only')
 
+    def get_total_media_files(self) -> int:
+        """Counts the total number of media files in the archive without extracting."""
+        archive_lower = self.archive_path.lower()
+        if not archive_lower.endswith('.zip'):
+            return 0
+        
+        import zipfile
+        try:
+            with zipfile.ZipFile(self.archive_path, 'r') as zip_ref:
+                return sum(
+                    1
+                    for info in zip_ref.infolist()
+                    if not info.is_dir() and os.path.splitext(info.filename)[1].lower() in self.media_extensions
+                )
+        except zipfile.BadZipFile:
+            return 0
+
+    def get_total_files_by_type(self, media_type: str) -> int:
+        """Counts the total number of files of a specific media type in the archive."""
+        archive_lower = self.archive_path.lower()
+        if not archive_lower.endswith('.zip'):
+            return 0
+
+        extensions = set()
+        if media_type == 'images':
+            extensions = self.photo_ext
+        elif media_type == 'videos':
+            extensions = self.video_ext
+        else:
+            return 0
+
+        import zipfile
+        try:
+            with zipfile.ZipFile(self.archive_path, 'r') as zip_ref:
+                return sum(
+                    1
+                    for info in zip_ref.infolist()
+                    if not info.is_dir() and os.path.splitext(info.filename)[1].lower() in extensions
+                )
+        except zipfile.BadZipFile:
+            return 0
+
     async def _stream_zip_entries(self, event=None) -> AsyncGenerator[StreamingEntry, None]:
         import zipfile
 

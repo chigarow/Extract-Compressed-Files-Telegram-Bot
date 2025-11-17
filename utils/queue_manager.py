@@ -1831,13 +1831,13 @@ class QueueManager:
             success, error_msg = await loop.run_in_executor(None, extract_archive_async, temp_archive_path, extract_path, filename)
             
             if not success:
-                logger.error(f"Extraction failed for {filename}: {error_msg}")
-                # Clean up extraction directory on failure
-                try:
-                    import shutil
-                    shutil.rmtree(extract_path, ignore_errors=True)
-                except Exception:
-                    pass
+                await self._handle_extraction_failure(
+                    filename=filename,
+                    error_msg=error_msg,
+                    temp_archive_path=temp_archive_path,
+                    extract_path=extract_path,
+                    event=event
+                )
                 return
             
             # Find extracted media files
@@ -1955,7 +1955,7 @@ class QueueManager:
                         'extraction_folder': extract_path,
                         'is_grouped': True
                     }
-                    await self.add_upload_task(upload_task)
+                await self.add_upload_task(upload_task)
             
             # Clean up the original archive
             try:
@@ -1969,6 +1969,38 @@ class QueueManager:
             logger.error(f"Error processing extraction for {filename}: {e}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
+
+    async def _handle_extraction_failure(self, filename, error_msg, temp_archive_path, extract_path, event=None):
+        """Notify the user about extraction failures and clean up artifacts."""
+        logger.error(f"Extraction failed for {filename}: {error_msg}")
+        message = f'❌ Extraction failed for {filename}: {error_msg or "Unknown error"}'
+        if error_msg and 'no space left on device' in error_msg.lower():
+            message += '\n💾 Please free up storage space and try again.'
+        
+        if event:
+            try:
+                await event.reply(message)
+            except Exception as reply_error:
+                logger.warning(f"Could not notify user about extraction failure for {filename}: {reply_error}")
+        else:
+            logger.info(f"(No event) {message}")
+        
+        # Clean up extraction directory if it exists
+        if extract_path and os.path.exists(extract_path):
+            try:
+                import shutil
+                shutil.rmtree(extract_path, ignore_errors=True)
+                logger.info(f"🧹 Removed extraction directory: {extract_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean extraction folder {extract_path}: {cleanup_error}")
+        
+        # Remove the downloaded archive to free disk space
+        if temp_archive_path and os.path.exists(temp_archive_path):
+            try:
+                os.remove(temp_archive_path)
+                logger.info(f"🧹 Removed failed archive download: {temp_archive_path}")
+            except Exception as archive_cleanup_error:
+                logger.warning(f"Could not remove archive {temp_archive_path}: {archive_cleanup_error}")
 
     async def _process_direct_media_upload(self, upload_task):
         """Process direct media compression and upload asynchronously"""
@@ -2402,7 +2434,14 @@ class ProcessingQueue:
             success, error_msg = await loop.run_in_executor(None, extract_archive_async, temp_archive_path, extract_path, filename)
             
             if not success:
-                raise RuntimeError(f"Extraction failed: {error_msg}")
+                await self._handle_extraction_failure(
+                    filename=filename,
+                    error_msg=error_msg,
+                    temp_archive_path=temp_archive_path,
+                    extract_path=extract_path,
+                    event=event
+                )
+                return
             
             # Find media files
             media_files = []

@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import json
+from typing import Union
 from telethon.errors import FloodWaitError
 from .constants import (
     DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS,
@@ -1885,6 +1886,48 @@ class QueueManager:
         except Exception as e:
             logger.error(f"Failed to update retry queue: {e}")
 
+    async def _process_streaming_archive(self, processing_task):
+        """Process an archive using the streaming pipeline."""
+        filename = processing_task.get('filename', 'unknown')
+        temp_archive_path = processing_task.get('temp_archive_path')
+        event = processing_task.get('event')
+
+        try:
+            from .constants import MEDIA_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
+            extractor = StreamingExtractor(
+                archive_path=temp_archive_path,
+                temp_dir=os.path.dirname(temp_archive_path),
+                media_extensions=set(MEDIA_EXTENSIONS),
+                photo_extensions=set(PHOTO_EXTENSIONS),
+                video_extensions=set(VIDEO_EXTENSIONS),
+                manifest_dir=STREAMING_MANIFEST_DIR,
+                min_free_bytes=STREAMING_MIN_FREE_GB * 1024**3,
+                check_interval=STREAMING_LOW_SPACE_CHECK_INTERVAL,
+            )
+
+            batch_builder = StreamingBatchBuilder(self, extractor, event, filename)
+
+            async for entry in extractor.stream_entries(event=event):
+                await batch_builder.add_entry(entry)
+            
+            await batch_builder.flush()
+            
+            extractor.finalize()
+            logger.info(f"✅ Streaming extraction and upload queuing completed for {filename}")
+
+        except Exception as e:
+            logger.error(f"Streaming extraction failed for {filename}: {e}")
+            if event:
+                await event.reply(f"❌ Streaming extraction failed for {filename}: {e}")
+        finally:
+            # Clean up the original archive
+            if os.path.exists(temp_archive_path):
+                try:
+                    os.remove(temp_archive_path)
+                    logger.info(f"Cleaned up archive: {temp_archive_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to clean up archive {temp_archive_path}: {e}")
+
     async def _process_extraction_and_upload(self, processing_task):
         """Process archive extraction and upload asynchronously without blocking download queue"""
         filename = processing_task.get('filename', 'unknown')
@@ -2403,6 +2446,14 @@ class ProcessingQueue:
         # Start processor if not running
         if self.processing_task is None or self.processing_task.done():
             self.processing_task = asyncio.create_task(self._process_queue())
+    
+    def get_queue_size(self) -> int:
+        """Return the current size of the processing queue."""
+        return self.processing_queue.qsize()
+
+    def get_current_processing(self) -> Union[dict, None]:
+        """Return the task currently being processed."""
+        return self.current_processing
     
     async def _process_queue(self):
         """Process the main processing queue."""

@@ -14,9 +14,11 @@ from datetime import datetime
 import psutil
 from .constants import (
     MAX_ARCHIVE_GB, MAX_CONCURRENT, FAST_DOWNLOAD_ENABLED, 
-    WIFI_ONLY_MODE, TRANSCODE_ENABLED, DATA_DIR, LOG_FILE
+    WIFI_ONLY_MODE, TRANSCODE_ENABLED, DATA_DIR, LOG_FILE,
+    STREAMING_MANIFEST_DIR
 )
 from .utils import human_size, format_eta
+from .queue_manager import get_queue_manager, get_processing_queue
 from config import config
 
 logger = logging.getLogger('extractor')
@@ -394,16 +396,58 @@ async def handle_status_command(event):
     await event.reply(status_message)
 
 
+async def _get_streaming_progress_status() -> list[str]:
+    """Scans for streaming manifests and returns formatted progress status lines."""
+    if not os.path.exists(STREAMING_MANIFEST_DIR):
+        return []
+
+    status_lines = []
+    try:
+        for entry in os.scandir(STREAMING_MANIFEST_DIR):
+            if entry.is_file() and entry.name.endswith('.json'):
+                try:
+                    with open(entry.path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    total = data.get('total_files', 0)
+                    processed = len(data.get('processed', []))
+                    
+                    if total > 0:
+                        # Derive archive name from manifest filename
+                        archive_name = os.path.basename(entry.name).replace('.json', '')
+                        
+                        percentage = (processed / total) * 100 if total > 0 else 0
+                        
+                        status_line = (
+                            f"Stream-Extracting: **{archive_name}**\n"
+                            f"Progress: {processed}/{total} files ({percentage:.1f}%)"
+                        )
+                        status_lines.append(status_line)
+                except (json.JSONDecodeError, IOError) as e:
+                    logger.warning(f"Could not read or parse streaming manifest {entry.name}: {e}")
+    except OSError as e:
+        logger.error(f"Could not scan streaming manifest directory: {e}")
+
+    if status_lines:
+        # Return a single formatted block
+        progress_block = "**Streaming Extraction Progress**\n" + "\n".join(status_lines)
+        return [progress_block]
+    return []
+
+
 async def handle_queue_command(event):
     """Show current processing status and queue information"""
     global current_processing, pending_password
     
-    # Import queue manager
-    from .queue_manager import get_queue_manager, get_processing_queue
     queue_manager = get_queue_manager()
     processing_queue = get_processing_queue()
     
     status_lines = []
+
+    # Get streaming progress
+    streaming_status = await _get_streaming_progress_status()
+    if streaming_status:
+        status_lines.extend(streaming_status)
     
     # Get queue status from queue manager
     queue_status = queue_manager.get_queue_status()

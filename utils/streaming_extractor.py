@@ -29,7 +29,8 @@ class StreamingManifest:
     def __init__(self, manifest_path: str):
         self.manifest_path = manifest_path
         os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
-        self.processed = set()  # type: set[str]
+        self.processed: set[str] = set()
+        self.total_files: int = 0
         self._load()
 
     def _load(self) -> None:
@@ -39,18 +40,27 @@ class StreamingManifest:
             with open(self.manifest_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             self.processed = set(data.get('processed', []))
+            self.total_files = data.get('total_files', 0)
         except Exception as exc:
             logger.warning(f"Failed to load streaming manifest {self.manifest_path}: {exc}")
             self.processed = set()
+            self.total_files = 0
 
     def mark_completed(self, entries: Iterable[str]) -> None:
         self.processed.update(entries)
         self._save()
 
+    def set_total_files(self, total: int) -> None:
+        if self.total_files != total:
+            self.total_files = total
+            self._save()
+
     def _save(self) -> None:
         try:
             with open(self.manifest_path, 'w', encoding='utf-8') as f:
-                json.dump({'processed': sorted(self.processed)}, f, indent=2)
+                json.dump(
+                    {'total_files': self.total_files, 'processed': sorted(self.processed)}, f, indent=2
+                )
         except Exception as exc:
             logger.warning(f"Failed to save streaming manifest {self.manifest_path}: {exc}")
 
@@ -106,6 +116,13 @@ class StreamingExtractor:
                 entries: List[zipfile.ZipInfo] = zip_ref.infolist()
         except zipfile.BadZipFile as exc:
             raise RuntimeError(f'Invalid ZIP archive: {exc}') from exc
+
+        total_media_files = sum(
+            1
+            for info in entries
+            if not info.is_dir() and os.path.splitext(info.filename)[1].lower() in self.media_extensions
+        )
+        self.manifest.set_total_files(total_media_files)
 
         for info in entries:
             if info.is_dir():

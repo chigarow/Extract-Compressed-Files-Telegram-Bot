@@ -40,6 +40,7 @@ from .torbox_downloader import (
     is_torbox_link, extract_torbox_links, get_filename_from_url, extract_file_id_from_url,
     download_from_torbox, download_torbox_with_progress, detect_file_type_from_url, get_torbox_metadata
 )
+from .streaming_extractor import StreamingExtractor, StreamingEntry, mark_streaming_entries_completed
 
 __all__ = [
     'human_size', 'format_eta', 'setup_logger', 'compute_sha256', 'extract_with_password',
@@ -58,4 +59,8 @@ __all__ = [
     'handle_cleanup_command', 'handle_confirm_cleanup_command', 'handle_cleanup_orphans_command',
     'is_torbox_link', 'extract_torbox_links', 'get_filename_from_url', 'extract_file_id_from_url',
     'download_from_torbox', 'download_torbox_with_progress', 'detect_file_type_from_url', 'get_torbox_metadata'
+]
+
+__all__ += [
+    'StreamingExtractor', 'StreamingEntry', 'mark_streaming_entries_completed'
 ]

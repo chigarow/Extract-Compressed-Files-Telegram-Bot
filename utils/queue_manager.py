@@ -9,9 +9,14 @@ import os
 import time
 import json
 from telethon.errors import FloodWaitError
-from .constants import DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS, RETRY_BASE_INTERVAL
+from .constants import (
+    DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS,
+    RETRY_BASE_INTERVAL, STREAMING_EXTRACTION_ENABLED, STREAMING_MIN_FREE_GB,
+    STREAMING_LOW_SPACE_CHECK_INTERVAL, STREAMING_MANIFEST_DIR, TORBOX_DIR
+)
 from .cache_manager import PersistentQueue
 from .constants import DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE, RETRY_QUEUE_FILE
+from .streaming_extractor import StreamingExtractor, mark_streaming_entries_completed
 
 # Telegram's hard limit for media files per album/grouped message
 # Source: https://limits.tginfo.me/en and official Telegram documentation
@@ -71,6 +76,63 @@ class ExtractionCleanupRegistry:
                 logger.warning(f"Extraction folder already removed: {extraction_folder}")
         except Exception as e:
             logger.error(f"Failed to clean up extraction folder {extraction_folder}: {e}")
+
+
+class StreamingBatchBuilder:
+    """Accumulates streaming entries and dispatches grouped uploads sequentially."""
+
+    def __init__(self, queue_manager, extractor, event, source_archive):
+        self.queue_manager = queue_manager
+        self.extractor = extractor
+        self.event = event
+        self.source_archive = source_archive
+        self.buffers = {'images': [], 'videos': []}
+        self.batch_counters = {'images': 0, 'videos': 0}
+
+    async def add_entry(self, entry):
+        media_type = entry.media_type if entry.media_type in ('images', 'videos') else 'images'
+        self.buffers[media_type].append(entry)
+        if len(self.buffers[media_type]) >= TELEGRAM_ALBUM_MAX_FILES:
+            await self._dispatch(media_type)
+
+    async def flush(self):
+        for media_type in ('images', 'videos'):
+            if self.buffers[media_type]:
+                await self._dispatch(media_type)
+
+    async def _dispatch(self, media_type: str):
+        entries = self.buffers[media_type]
+        if not entries:
+            return
+
+        self.batch_counters[media_type] += 1
+        batch_num = self.batch_counters[media_type]
+        filename = (
+            f"{self.source_archive} - {media_type.title()} Batch {batch_num}"
+            f" ({len(entries)} files)"
+        )
+
+        upload_task = {
+            'type': 'grouped_media',
+            'media_type': media_type,
+            'event': self.event,
+            'file_paths': [entry.temp_path for entry in entries],
+            'filename': filename,
+            'source_archive': self.source_archive,
+            'is_grouped': True,
+            'cleanup_file_paths': True,
+            'streaming_manifest': self.extractor.manifest_path,
+            'streaming_entries': [entry.entry_name for entry in entries]
+        }
+
+        logger.info(
+            f"📦 Streaming batch ready: {media_type} batch {batch_num} with {len(entries)} files"
+        )
+
+        await self.queue_manager.add_upload_task(upload_task)
+        # Wait for upload queue to finish this batch before extracting more files
+        await self.queue_manager._wait_for_upload_idle()
+        self.buffers[media_type] = []
 
 
 class BackwardsCompatibleQueue(asyncio.Queue):
@@ -1135,6 +1197,20 @@ class QueueManager:
                 except Exception as e:
                     logger.warning(f"Failed to update completion status: {e}")
             logger.info(f"Grouped upload completed successfully: {filename}")
+
+            if task.get('cleanup_file_paths'):
+                for file_path in validated_files:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                    except Exception as cleanup_error:
+                        logger.warning(f"Failed to remove streaming temp file {file_path}: {cleanup_error}")
+            manifest_path = task.get('streaming_manifest')
+            if manifest_path:
+                try:
+                    mark_streaming_entries_completed(manifest_path, task.get('streaming_entries', []))
+                except Exception as manifest_error:
+                    logger.warning(f"Failed to update streaming manifest {manifest_path}: {manifest_error}")
             
             # Clean up uploaded files
             for file_path in cache_files:
@@ -1685,6 +1761,15 @@ class QueueManager:
         
         return was_queue_empty  # Return if this was the first item
 
+    async def _wait_for_upload_idle(self):
+        """Wait until the upload queue and worker are idle."""
+        while True:
+            queue_empty = self.upload_queue.qsize() == 0
+            processor_idle = self.upload_task is None or self.upload_task.done()
+            if queue_empty and processor_idle:
+                return
+            await asyncio.sleep(1)
+
     async def clear_completed_tasks(self):
         # Remove completed tasks from download queue
         remaining = []
@@ -1808,10 +1893,18 @@ class QueueManager:
         
         logger.info(f"Starting extraction and upload processing for {filename}")
         
+        use_streaming = (
+            STREAMING_EXTRACTION_ENABLED and filename.lower().endswith('.zip') and
+            temp_archive_path and TORBOX_DIR in temp_archive_path
+        )
+        if use_streaming:
+            logger.info(f"Using streaming extraction pipeline for {filename}")
+            await self._process_streaming_archive(processing_task)
+            return
+        
         try:
             # Create extraction directory
             import time
-            from .constants import TORBOX_DIR
             
             # Check if this is a Torbox file (file exists in TORBOX_DIR)
             is_torbox_file = temp_archive_path and TORBOX_DIR in temp_archive_path
@@ -2398,7 +2491,83 @@ class ProcessingQueue:
                 event = task.get('event')
                 if event:
                     await event.reply(f'❌ Processing permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts')
-    
+
+    async def _process_streaming_archive(self, task: dict):
+        """Stream archive extraction to minimize disk usage."""
+        import time
+        import shutil
+        from .constants import MEDIA_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS
+        
+        temp_archive_path = task.get('temp_archive_path')
+        filename = task.get('filename')
+        event = task.get('event')
+        if not temp_archive_path or not os.path.exists(temp_archive_path):
+            raise FileNotFoundError(f"Archive file not found: {temp_archive_path}")
+        
+        base_dir = os.path.dirname(temp_archive_path) if temp_archive_path else TORBOX_DIR
+        extract_path = os.path.join(base_dir, f'streaming_{filename}_{int(time.time())}')
+        os.makedirs(extract_path, exist_ok=True)
+        logger.info(f"🌀 Streaming extraction directory: {extract_path}")
+        if event:
+            try:
+                await event.reply(f'🌀 Streaming extraction started for {filename}...')
+            except Exception as exc:
+                logger.warning(f"Failed to send streaming start message: {exc}")
+        
+        min_free_bytes = int(STREAMING_MIN_FREE_GB * (1024 ** 3))
+        extractor = StreamingExtractor(
+            archive_path=temp_archive_path,
+            temp_dir=extract_path,
+            media_extensions=set(MEDIA_EXTENSIONS),
+            photo_extensions=set(PHOTO_EXTENSIONS),
+            video_extensions=set(VIDEO_EXTENSIONS),
+            manifest_dir=STREAMING_MANIFEST_DIR,
+            min_free_bytes=min_free_bytes,
+            check_interval=STREAMING_LOW_SPACE_CHECK_INTERVAL
+        )
+        batch_builder = StreamingBatchBuilder(self, extractor, event, filename)
+        processed = 0
+        try:
+            async for entry in extractor.stream_entries(event):
+                processed += 1
+                await batch_builder.add_entry(entry)
+                if event and processed % 25 == 0:
+                    try:
+                        await event.reply(f'📤 Prepared {processed} files from {filename}...')
+                    except Exception as exc:
+                        logger.debug(f"Skipping streaming progress message: {exc}")
+            await batch_builder.flush()
+            await self._wait_for_upload_idle()
+            extractor.finalize()
+            if processed == 0:
+                msg = f'ℹ️ No media files found in {filename}'
+            else:
+                msg = f'✅ Uploaded {processed} media files from {filename}'
+            if event:
+                try:
+                    await event.reply(msg)
+                except Exception as exc:
+                    logger.warning(f"Failed to send streaming completion message: {exc}")
+        except Exception as exc:
+            await self._handle_extraction_failure(
+                filename=filename,
+                error_msg=str(exc),
+                temp_archive_path=temp_archive_path,
+                extract_path=extract_path,
+                event=event
+            )
+            return
+        finally:
+            try:
+                if os.path.exists(temp_archive_path):
+                    os.remove(temp_archive_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Could not remove archive {temp_archive_path}: {cleanup_error}")
+            try:
+                shutil.rmtree(extract_path, ignore_errors=True)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean streaming directory {extract_path}: {cleanup_error}")
+
     async def _process_archive_extraction(self, task: dict):
         """Process archive extraction and media upload."""
         from .file_operations import extract_archive_async
@@ -2411,9 +2580,6 @@ class ProcessingQueue:
         
         if not temp_archive_path or not os.path.exists(temp_archive_path):
             raise FileNotFoundError(f"Archive file not found: {temp_archive_path}")
-        
-        # Create extraction directory
-        from .constants import TORBOX_DIR
         
         # Check if this is a Torbox file (file exists in TORBOX_DIR)
         is_torbox_file = temp_archive_path and TORBOX_DIR in temp_archive_path

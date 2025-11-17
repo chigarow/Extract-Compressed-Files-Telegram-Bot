@@ -57,6 +57,13 @@ FAILED_OPERATIONS_FILE = os.path.join(DATA_DIR, 'failed_operations.json')
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(TORBOX_DIR, exist_ok=True)
 
+# Streaming extraction configuration
+STREAMING_MANIFEST_DIR = os.path.join(DATA_DIR, 'streaming_manifests')
+os.makedirs(STREAMING_MANIFEST_DIR, exist_ok=True)
+STREAMING_EXTRACTION_ENABLED = True
+STREAMING_MIN_FREE_GB = float(os.environ.get('STREAMING_MIN_FREE_GB', 3))
+STREAMING_LOW_SPACE_CHECK_INTERVAL = int(os.environ.get('STREAMING_LOW_SPACE_CHECK_INTERVAL', 30))
+
 # Progress reporting settings
 MIN_PCT_STEP = 5
 MIN_EDIT_INTERVAL = 7  # seconds

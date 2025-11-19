@@ -959,8 +959,13 @@ class QueueManager:
 
         file_ext = os.path.splitext(temp_path)[1].lower()
         size_bytes = os.path.getsize(temp_path) if os.path.exists(temp_path) else task.get('size_bytes', 0)
+        
+        # Determine task type based on extension
+        is_media = file_ext in MEDIA_EXTENSIONS
+        upload_task_type = 'webdav_media_upload' if is_media else 'webdav_document_upload'
+
         upload_task = {
-            'type': 'webdav_media_upload',
+            'type': upload_task_type,
             'event': event if live_event else None,
             'file_path': temp_path,
             'filename': filename,
@@ -969,11 +974,7 @@ class QueueManager:
             'retry_count': 0
         }
 
-        if file_ext in MEDIA_EXTENSIONS:
-            await self._process_direct_media_upload(upload_task)
-        else:
-            upload_task['type'] = 'webdav_document_upload'
-            await self.add_upload_task(upload_task)
+        await self.add_upload_task(upload_task)
 
     async def _handle_webdav_download_failure(self, task: dict, event, error: Exception, live_event: bool):
         """Handle retries for failed WebDAV downloads."""

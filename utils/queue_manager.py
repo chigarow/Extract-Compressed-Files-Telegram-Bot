@@ -17,9 +17,11 @@ from .constants import (
     STREAMING_LOW_SPACE_CHECK_INTERVAL, STREAMING_MANIFEST_DIR, TORBOX_DIR,
     WEBDAV_DIR, MEDIA_EXTENSIONS, DATA_DIR
 )
-from .cache_manager import PersistentQueue
+from .file_operations import compute_sha256
+from .cache_manager import PersistentQueue, CacheManager
 from .constants import DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE, RETRY_QUEUE_FILE
 from .streaming_extractor import StreamingExtractor, mark_streaming_entries_completed
+from .telegram_operations import TelegramOperations, ensure_target_entity, get_client
 
 # Telegram's hard limit for media files per album/grouped message
 # Source: https://limits.tginfo.me/en and official Telegram documentation
@@ -655,7 +657,7 @@ class QueueManager:
             await self._execute_webdav_file_task(task)
             return
 
-        from .telegram_operations import TelegramOperations, create_download_progress_callback
+        from .telegram_operations import create_download_progress_callback
         from .constants import MAX_RETRY_ATTEMPTS, RETRY_BASE_INTERVAL
         import time
         
@@ -1016,9 +1018,7 @@ class QueueManager:
 
     async def _execute_upload_task(self, task: dict):
         """Execute an upload task."""
-        from .telegram_operations import TelegramOperations, ensure_target_entity, get_client
         from .media_processing import needs_video_processing, compress_video_for_telegram
-        from .cache_manager import CacheManager
         from .utils import human_size
         from .file_operations import compute_sha256
         from .constants import VIDEO_EXTENSIONS, PHOTO_EXTENSIONS
@@ -1256,9 +1256,7 @@ class QueueManager:
     
     async def _execute_grouped_upload(self, task: dict):
         """Execute a grouped media upload (multiple files as one album)."""
-        from .telegram_operations import TelegramOperations, ensure_target_entity, get_client
         from .media_processing import needs_video_processing, compress_video_for_telegram
-        from .cache_manager import CacheManager
         from .constants import VIDEO_EXTENSIONS
         import os
         import time
@@ -1570,7 +1568,7 @@ class QueueManager:
             logger.error(f"Grouped upload failed for {filename} (attempt {retry_count}): {e}")
             
             # Check if this is Telegram's 10MB photo size limit error
-            from .media_processing import is_telegram_photo_size_error, compress_image_for_telegram
+            from .media_processing import is_telegram_photo_size_error, compress_image_for_telegram, is_ffprobe_available
             from .constants import PHOTO_EXTENSIONS
             
             # Check if task was already compressed to avoid infinite loops
@@ -1830,14 +1828,28 @@ class QueueManager:
         """
         Save queues to persistent storage (backwards compatibility for legacy tests).
         
-        In the current implementation, queues are saved automatically when items are added/removed.
-        This method is provided for legacy test compatibility but is essentially a no-op since
-        persistence happens automatically via PersistentQueue.
+        Syncs the current in-memory queue state to persistent storage.
+        This is needed when tests manually modify queue items after adding them.
         """
-        logger.debug("save_queues() called (legacy compatibility - persistence is automatic)")
-        # Current implementation uses PersistentQueue which saves automatically
-        # This method exists only for backwards compatibility with tests
-        pass
+        logger.debug("save_queues() called - syncing current queue state to disk")
+        
+        # Sync download queue to persistent storage
+        try:
+            download_items = list(self.download_queue._queue)  # type: ignore
+            self.download_persistent.queue_data = download_items
+            self.download_persistent.save_queue()
+            logger.debug(f"Saved {len(download_items)} download tasks to persistent storage")
+        except Exception as e:
+            logger.error(f"Failed to save download queue: {e}")
+        
+        # Sync upload queue to persistent storage
+        try:
+            upload_items = list(self.upload_queue._queue)  # type: ignore
+            self.upload_persistent.queue_data = upload_items
+            self.upload_persistent.save_queue()
+            logger.debug(f"Saved {len(upload_items)} upload tasks to persistent storage")
+        except Exception as e:
+            logger.error(f"Failed to save upload queue: {e}")
     
     def load_queues(self):
         """
@@ -1942,6 +1954,13 @@ class QueueManager:
             'created_at': None
         }
         await self.download_queue.put(task)
+        self.download_persistent.add_item(task)
+        
+        # Start processor if not running
+        if self.download_task is None or self.download_task.done():
+            logger.info(f"Starting download processor for legacy task")
+            self.download_task = asyncio.create_task(self._process_download_queue())
+        
         return task['id']
 
     async def add_upload_task_legacy(self, file_path, chat_id, options=None):
@@ -2471,7 +2490,16 @@ class QueueManager:
             'media invalid',
             'current account may not be able to send it',
             'sendmultimediarequest',
-            'media object is invalid'
+            'media object is invalid',
+            'invalid_file',
+            'corrupted',
+            'unsupported format',
+            'invalid media object',
+            'media_invalid',
+            'invalid_argument',
+            'file_reference_expired',
+            'media group',
+            'grouped media'
         ]
         
         # Must contain at least 2 of these indicators to be considered invalid media error
@@ -2523,34 +2551,38 @@ class QueueManager:
                 # Continue with other checks
             
             # Try ffprobe if available (more thorough check)
-            try:
-                result = subprocess.run([
-                    'ffprobe', '-v', 'quiet', '-print_format', 'json', 
-                    '-show_format', '-show_streams', file_path
-                ], capture_output=True, text=True, timeout=10)
-                
-                if result.returncode == 0:
-                    data = json.loads(result.stdout)
+            # Import here to avoid circular imports if needed, or use the one from media_processing
+            from .media_processing import is_ffprobe_available
+            
+            if is_ffprobe_available():
+                try:
+                    result = subprocess.run([
+                        'ffprobe', '-v', 'quiet', '-print_format', 'json', 
+                        '-show_format', '-show_streams', file_path
+                    ], capture_output=True, text=True, timeout=10)
                     
-                    # Check if we have video streams
-                    if 'streams' in data:
-                        video_streams = [s for s in data['streams'] if s.get('codec_type') == 'video']
-                        if video_streams:
-                            logger.info(f"Video file validated with ffprobe: {file_path}")
-                            return True
+                    if result.returncode == 0:
+                        data = json.loads(result.stdout)
+                        
+                        # Check if we have video streams
+                        if 'streams' in data:
+                            video_streams = [s for s in data['streams'] if s.get('codec_type') == 'video']
+                            if video_streams:
+                                logger.info(f"Video file validated with ffprobe: {file_path}")
+                                return True
+                            else:
+                                logger.error(f"No video streams found in file: {file_path}")
+                                return False
                         else:
-                            logger.error(f"No video streams found in file: {file_path}")
+                            logger.error(f"No streams found in video file: {file_path}")
                             return False
                     else:
-                        logger.error(f"No streams found in video file: {file_path}")
-                        return False
-                else:
-                    logger.warning(f"ffprobe failed for {file_path}: {result.stderr}")
+                        logger.warning(f"ffprobe failed for {file_path}: {result.stderr}")
+                        # Fallback to basic validation
+                
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
+                    logger.warning(f"ffprobe not available or failed for {file_path}: {e}")
                     # Fallback to basic validation
-            
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
-                logger.warning(f"ffprobe not available or failed for {file_path}: {e}")
-                # Fallback to basic validation
             
             # Basic validation fallback - check file extension and size
             file_ext = os.path.splitext(file_path)[1].lower()

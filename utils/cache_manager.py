@@ -64,12 +64,22 @@ def make_serializable(obj):
             file_serialized = None
             if file_obj is not None:
                 if _Mock and isinstance(file_obj, _Mock):
-                    d = file_obj.__dict__
+                    # Use getattr for explicitly set Mock attributes
+                    def _get_mock_attr(mock_obj, attr):
+                        try:
+                            val = getattr(mock_obj, attr, None)
+                            if _Mock and isinstance(val, _Mock):
+                                # Attribute was never explicitly set, it's a Mock
+                                return None
+                            return val
+                        except:
+                            return None
+                    
                     file_serialized = {
-                        'id': d.get('id'),
-                        'name': d.get('file_name') or d.get('name'),
-                        'size': d.get('size'),
-                        'mime_type': d.get('mime_type'),
+                        'id': _get_mock_attr(file_obj, 'id'),
+                        'name': _get_mock_attr(file_obj, 'name') or _get_mock_attr(file_obj, 'file_name'),
+                        'size': _get_mock_attr(file_obj, 'size'),
+                        'mime_type': _get_mock_attr(file_obj, 'mime_type'),
                         '_type': 'File'
                     }
                 else:
@@ -80,21 +90,44 @@ def make_serializable(obj):
                         'mime_type': getattr(file_obj, 'mime_type', None),
                         '_type': 'File'
                     }
+            
+            # Extract optional fields, filtering out Mock objects
+            def _unwrap_mock(val):
+                if _Mock and isinstance(val, _Mock):
+                    return None
+                if isinstance(val, datetime.datetime):
+                    return val.isoformat()
+                return val
+            
             return {
-                'id': getattr(obj, 'id', None),
-                'message': getattr(obj, 'message', None),
+                'id': _unwrap_mock(getattr(obj, 'id', None)),
+                'message': _unwrap_mock(getattr(obj, 'message', None)),
+                'date': _unwrap_mock(getattr(obj, 'date', None)),
+                'from_id': _unwrap_mock(getattr(obj, 'from_id', None)),
+                'to_id': _unwrap_mock(getattr(obj, 'to_id', None)),
+                'out': _unwrap_mock(getattr(obj, 'out', None)),
                 'file': file_serialized,
                 '_type': 'Message'
             }
         if hasattr(obj, 'id') and (hasattr(obj, 'size') or hasattr(obj, 'mime_type')):
             # Treat as File-like
             if _Mock and isinstance(obj, _Mock):
-                d = obj.__dict__
+                # Use getattr for explicitly set Mock attributes
+                def _get_mock_attr(mock_obj, attr):
+                    try:
+                        val = getattr(mock_obj, attr, None)
+                        if _Mock and isinstance(val, _Mock):
+                            # Attribute was never explicitly set, it's a Mock
+                            return None
+                        return val
+                    except:
+                        return None
+                
                 return {
-                    'id': d.get('id'),
-                    'name': d.get('file_name') or d.get('name'),
-                    'size': d.get('size'),
-                    'mime_type': d.get('mime_type'),
+                    'id': _get_mock_attr(obj, 'id'),
+                    'name': _get_mock_attr(obj, 'name') or _get_mock_attr(obj, 'file_name'),
+                    'size': _get_mock_attr(obj, 'size'),
+                    'mime_type': _get_mock_attr(obj, 'mime_type'),
                     '_type': 'File'
                 }
             else:

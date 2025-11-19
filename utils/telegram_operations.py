@@ -17,6 +17,11 @@ from .constants import (
 )
 from .utils import human_size, format_eta
 from . import media_processing
+try:
+    from .fast_download import fast_download_to_file
+except ImportError:
+    # Fallback or mock if module is missing/circular import
+    fast_download_to_file = None
 
 logger = logging.getLogger('extractor')
 
@@ -56,6 +61,7 @@ class TelegramOperations:
     
     def __init__(self, client_instance: TelegramClient = None):
         global client
+        self.progress_tracker = {}  # Initialize progress tracker
         if client_instance:
             self.client = client_instance
         elif client:
@@ -105,14 +111,14 @@ class TelegramOperations:
     async def upload_photo(self, target, file_path: str, caption: str = "", progress_callback=None):
         """Upload a photo to Telegram."""
         try:
-            await self.client.send_file(
+            msg = await self.client.send_file(
                 target,
                 file_path,
                 caption=caption,
                 progress_callback=progress_callback
             )
             logger.info(f"Photo uploaded successfully: {file_path}")
-            return True
+            return msg
         except Exception as e:
             logger.error(f"Photo upload failed for {file_path}: {e}")
             raise
@@ -137,7 +143,7 @@ class TelegramOperations:
             attributes.append(DocumentAttributeFilename(os.path.basename(file_path)))
             
             # Upload with attributes
-            await self.client.send_file(
+            msg = await self.client.send_file(
                 target,
                 file_path,
                 caption=caption,
@@ -154,7 +160,7 @@ class TelegramOperations:
                     logger.warning(f"Failed to remove thumbnail {thumbnail_path}: {e}")
             
             logger.info(f"Video uploaded successfully: {file_path}")
-            return True
+            return msg
             
         except Exception as e:
             logger.error(f"Video upload failed for {file_path}: {e}")
@@ -232,14 +238,14 @@ class TelegramOperations:
         else:
             # Upload as document
             try:
-                await self.client.send_file(
+                msg = await self.client.send_file(
                     target,
                     file_path,
                     caption=caption,
                     progress_callback=progress_callback
                 )
                 logger.info(f"Document uploaded successfully: {file_path}")
-                return True
+                return msg
             except Exception as e:
                 logger.error(f"Document upload failed for {file_path}: {e}")
                 raise
@@ -275,6 +281,8 @@ class TelegramOperations:
                     logger.warning(f"Progress update hit rate limit (wait {e.seconds}s), skipping updates")
                     # Set last_edit_time far in future to prevent further updates
                     last_edit_time = now + e.seconds
+                    # Also update last_edit_pct to prevent percentage-based updates
+                    last_edit_pct = pct
                 except Exception as e:
                     logger.debug(f"Progress update failed: {e}")
                     pass  # Ignore other edit errors
@@ -352,3 +360,91 @@ async def _safe_edit_message(msg, text):
 
 # Initialize the global client
 client = get_client()
+
+# Add missing methods to TelegramOperations for compatibility
+def _add_compatibility_methods():
+    """Add compatibility methods to TelegramOperations class."""
+    
+    async def download_file(self, document, file_path, use_fast_download=False, max_retries=0, progress_callback=None):
+        """Download a file with optional fast download and retries."""
+        # Create a dummy message object if document is passed directly
+        message = MockMessage(document=document) if not hasattr(document, 'document') else document
+        
+        # Retry logic
+        attempt = 0
+        while True:
+            try:
+                await self.download_file_with_progress(message, file_path, progress_callback)
+                return file_path
+            except Exception as e:
+                attempt += 1
+                if attempt > max_retries:
+                    raise e
+                await asyncio.sleep(0.1)  # Small delay between retries
+
+    async def upload_file(self, file_path, chat_id, caption="", progress_callback=None, max_retries=0):
+        """Upload a file with retries."""
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        target = await self.client.get_entity(chat_id)
+        
+        # Retry logic
+        attempt = 0
+        while True:
+            try:
+                return await self.upload_media_file(target, file_path, caption, progress_callback)
+            except Exception as e:
+                attempt += 1
+                if attempt > max_retries:
+                    raise e
+                await asyncio.sleep(0.1)  # Small delay between retries
+
+    async def send_message(self, chat_id, text, reply_to_msg_id=None):
+        """Send a text message."""
+        target = await self.client.get_entity(chat_id)
+        return await self.client.send_message(target, text, reply_to=reply_to_msg_id)
+
+    async def delete_message(self, chat_id, message_id):
+        """Delete a message."""
+        target = await self.client.get_entity(chat_id)
+        await self.client.delete_messages(target, message_id)
+        return True
+
+    async def edit_message(self, chat_id, message_id, text):
+        """Edit a message."""
+        target = await self.client.get_entity(chat_id)
+        return await self.client.edit_message(target, message_id, text)
+
+    async def get_file_info(self, document):
+        """Get file information from document."""
+        return {
+            'name': getattr(document, 'file_name', 'unknown'),
+            'size': getattr(document, 'size', 0),
+            'mime_type': getattr(document, 'mime_type', 'application/octet-stream'),
+            'id': getattr(document, 'id', 0)
+        }
+
+    async def ensure_connected(self):
+        """Ensure client is connected."""
+        if not self.client.is_connected():
+            await self.client.connect()
+
+    # Helper class for compatibility
+    class MockMessage:
+        def __init__(self, document=None):
+            self.document = document
+            self.id = 0
+            self.message = ""
+
+    # Attach methods
+    TelegramOperations.download_file = download_file
+    TelegramOperations.upload_file = upload_file
+    TelegramOperations.send_message = send_message
+    TelegramOperations.delete_message = delete_message
+    TelegramOperations.edit_message = edit_message
+    TelegramOperations.get_file_info = get_file_info
+    TelegramOperations.ensure_connected = ensure_connected
+
+_add_compatibility_methods()
+

@@ -250,6 +250,7 @@ class QueueManager:
         self.is_processing = False  # legacy flag used by tests
         self.active_uploads = 0  # tracks uploads currently executing
         self.processing_archives = set()
+        self._skip_upload_idle_wait = False  # test hook to bypass idle wait when no workers run
         
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
@@ -543,7 +544,9 @@ class QueueManager:
         logger.info(f"Upload task {filename} added to queue. New queue size: {self.upload_queue.qsize()}")
         
         # Start processor if not running
-        if self.upload_task is None or self.upload_task.done():
+        if getattr(self, '_disable_upload_worker_start', False):
+            logger.info("Upload worker start disabled (test mode)")
+        elif self.upload_task is None or self.upload_task.done():
             logger.info(f"Starting upload processor for {filename} (processor was not running)")
             self.upload_task = asyncio.create_task(self._process_upload_queue())
         else:
@@ -2012,7 +2015,9 @@ class QueueManager:
         logger.info(f"Upload task {filename} added to queue. New queue size: {self.upload_queue.qsize()}")
         
         # Start processor if not running
-        if self.upload_task is None or self.upload_task.done():
+        if getattr(self, '_disable_upload_worker_start', False):
+            logger.info("Upload worker start disabled (test mode)")
+        elif self.upload_task is None or self.upload_task.done():
             logger.info(f"Starting upload processor for {filename} (processor was not running)")
             self.upload_task = asyncio.create_task(self._process_upload_queue())
         else:
@@ -2022,6 +2027,8 @@ class QueueManager:
 
     async def _wait_for_upload_idle(self):
         """Wait until the upload queue and worker are idle."""
+        if getattr(self, '_skip_upload_idle_wait', False):
+            return
         while True:
             queue_empty = self.upload_queue.qsize() == 0
             uploads_in_flight = self.active_uploads == 0

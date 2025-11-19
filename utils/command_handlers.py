@@ -10,6 +10,7 @@ import subprocess
 import asyncio
 import logging
 import time
+import inspect
 from datetime import datetime
 import psutil
 from .constants import (
@@ -29,6 +30,16 @@ current_processing = None
 processing_queue = None
 semaphore = None
 start_time = None
+
+
+async def _safe_reply(event, text: str):
+    """Reply helper supporting sync and async event.reply implementations."""
+    if not event or not hasattr(event, 'reply'):
+        logger.debug(f"No reply method available for event; message not sent: {text}")
+        return
+    result = event.reply(text)
+    if inspect.isawaitable(result):
+        await result
 
 
 async def handle_password_command(event, password: str):
@@ -630,73 +641,78 @@ async def handle_cleanup_command(event, age_hours: str = "24"):
         try:
             max_age = int(age_hours)
             if max_age < 1:
-                await event.reply("❌ Age must be at least 1 hour")
+                await _safe_reply(event, "❌ Age must be at least 1 hour")
                 return
         except ValueError:
-            await event.reply("❌ Invalid age format. Use hours as a number (e.g., 24)")
+            await _safe_reply(event, "❌ Invalid age format. Use hours as a number (e.g., 24)")
             return
         
-        from .queue_manager import get_queue_manager
-        queue_mgr = get_queue_manager()
+        queue_mgr = queue_manager
         
         # First do a dry run to show what would be deleted
-        await event.reply(f"🔍 Scanning for files older than {max_age} hours...")
-        await queue_mgr.cleanup_old_files(max_age_hours=max_age, dry_run=True)
+        await _safe_reply(event, f"🔍 Scanning for files older than {max_age} hours...")
+        queue_mgr.cleanup_old_files(max_age_hours=max_age, dry_run=True)
         
         # Ask for confirmation
-        confirm_msg = await event.reply(f"🗑️ Run cleanup to delete files older than {max_age} hours?\nReply /confirm-cleanup to proceed or /cancel to abort")
+        confirm_msg = event.reply(
+            f"🗑️ Run cleanup to delete files older than {max_age} hours?\nReply /confirm-cleanup to proceed or /cancel to abort"
+        )
+        if inspect.isawaitable(confirm_msg):
+            confirm_msg = await confirm_msg
         
         # Store cleanup parameters for confirmation
         global pending_cleanup
-        pending_cleanup = {'max_age': max_age, 'msg_id': confirm_msg.id}
-        
+        user_id = getattr(event, 'sender_id', None)
+        if user_id is not None:
+            pending_cleanup[user_id] = max_age
+
     except Exception as e:
         logger.error(f"Error in cleanup command: {e}")
-        await event.reply(f"❌ Cleanup command failed: {e}")
+        await _safe_reply(event, f"❌ Cleanup command failed: {e}")
 
 
 async def handle_confirm_cleanup_command(event):
     """Handle cleanup confirmation command."""
     global pending_cleanup
-    
-    if not pending_cleanup:
-        await event.reply("❌ No cleanup operation pending")
+    user_id = getattr(event, 'sender_id', None)
+    max_age = pending_cleanup.get(user_id) if user_id is not None else None
+    if max_age is None:
+        await _safe_reply(event, "❌ No pending cleanup operation")
         return
     
     try:
-        from .queue_manager import get_queue_manager
-        queue_mgr = get_queue_manager()
+        queue_mgr = queue_manager
         
-        max_age = pending_cleanup['max_age']
-        await event.reply(f"🧹 Starting cleanup of files older than {max_age} hours...")
+        await _safe_reply(event, f"🧹 Starting cleanup of files older than {max_age} hours...")
         
         # Perform actual cleanup
-        await queue_mgr.cleanup_old_files(max_age_hours=max_age, dry_run=False)
-        await queue_mgr.cleanup_failed_upload_files()
+        queue_mgr.cleanup_old_files(max_age_hours=max_age)
+        queue_mgr.cleanup_failed_upload_files()
         
-        await event.reply("✅ Cleanup completed successfully!")
+        await _safe_reply(event, "✅ Cleanup completed successfully!")
         
     except Exception as e:
         logger.error(f"Error during cleanup: {e}")
-        await event.reply(f"❌ Cleanup failed: {e}")
+        await _safe_reply(event, f"❌ Cleanup failed: {e}")
     finally:
-        pending_cleanup = None
+        if user_id is not None:
+            pending_cleanup.pop(user_id, None)
 
 
 async def handle_cleanup_orphans_command(event):
     """Handle cleanup of orphaned extraction directories."""
     try:
-        from .queue_manager import get_queue_manager
-        queue_mgr = get_queue_manager()
+        queue_mgr = queue_manager
         
-        await event.reply("🔍 Scanning for orphaned extraction directories...")
-        await queue_mgr.cleanup_failed_upload_files()
-        await event.reply("✅ Orphaned directory cleanup completed!")
+        await _safe_reply(event, "🔍 Scanning for orphaned extraction directories...")
+        queue_mgr.cleanup_failed_upload_files()
+        await _safe_reply(event, "✅ Orphaned directory cleanup completed!")
         
     except Exception as e:
         logger.error(f"Error during orphan cleanup: {e}")
-        await event.reply(f"❌ Orphan cleanup failed: {e}")
+        await _safe_reply(event, f"❌ Orphan cleanup failed: {e}")
 
 
 # Global state for cleanup confirmation
-pending_cleanup = None
+pending_cleanup = {}
+queue_manager = get_queue_manager()

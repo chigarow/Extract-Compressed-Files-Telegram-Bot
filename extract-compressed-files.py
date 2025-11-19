@@ -63,6 +63,7 @@ from utils import (
     # Torbox downloads
     is_torbox_link, extract_torbox_links, get_filename_from_url,
     download_torbox_with_progress, detect_file_type_from_url,
+    extract_webdav_links, parse_webdav_url,
     
     # Command handlers
     handle_password_command, handle_max_concurrent_command, handle_set_max_archive_gb_command,
@@ -354,6 +355,66 @@ async def handle_torbox_link(event, torbox_url: str):
         await event.reply(f'❌ Error processing Torbox link: {e}')
 
 
+async def handle_webdav_link(event, webdav_url: str):
+    """Queue a WebDAV folder for recursive download and upload."""
+    from config import config
+
+    try:
+        base_url, remote_path = parse_webdav_url(webdav_url)
+    except ValueError as exc:
+        await event.reply(f'❌ Invalid WebDAV link: {exc}')
+        return
+
+    if not getattr(config, 'webdav_enabled', True):
+        await event.reply('⚠️ WebDAV processing is disabled in configuration.')
+        return
+
+    if not getattr(config, 'webdav_username', '') or not getattr(config, 'webdav_password', ''):
+        await event.reply('⚠️ WebDAV credentials missing in secrets.properties (WEBDAV_USERNAME/WEBDAV_PASSWORD).')
+        return
+
+    configured_base = getattr(config, 'webdav_base_url', 'https://webdav.torbox.app').rstrip('/')
+    if base_url.rstrip('/') != configured_base:
+        await event.reply('⚠️ WebDAV link host does not match configured WEBDAV_BASE_URL.')
+        return
+
+    display_name = remote_path.strip('/') or '/'
+    logger.info(f"Queuing WebDAV path {remote_path} ({display_name})")
+
+    status_msg = None
+    try:
+        status_msg = await event.reply(
+            f'🌐 Detected Torbox WebDAV folder:\n📁 {display_name}\n📋 Preparing recursive crawl...'
+        )
+    except Exception as reply_error:
+        logger.warning(f"Could not send initial WebDAV status message: {reply_error}")
+
+    download_task = {
+        'type': 'webdav_walk_download',
+        'event': event,
+        'filename': f'WebDAV: {display_name}',
+        'remote_path': remote_path,
+        'base_url': base_url,
+        'display_name': display_name
+    }
+
+    was_first_item = await queue_manager.add_download_task(download_task)
+    queue_position = queue_manager.download_queue.qsize()
+
+    if status_msg:
+        try:
+            if was_first_item:
+                await status_msg.edit(
+                    f'🌐 WebDAV folder detected: {display_name}\n🚀 Crawl starting immediately...'
+                )
+            else:
+                await status_msg.edit(
+                    f'🌐 WebDAV folder detected: {display_name}\n📋 Added to queue (position: {queue_position}).'
+                )
+        except Exception as edit_error:
+            logger.debug(f"Failed to edit WebDAV status message: {edit_error}")
+
+
 @client.on(events.NewMessage(incoming=True))
 async def watcher(event):
     """Main message watcher for handling incoming files and commands."""
@@ -471,6 +532,12 @@ async def watcher(event):
             if torbox_links:
                 for torbox_url in torbox_links:
                     await handle_torbox_link(event, torbox_url)
+                return
+
+            webdav_links = extract_webdav_links(text)
+            if webdav_links:
+                for webdav_url in webdav_links:
+                    await handle_webdav_link(event, webdav_url)
                 return
         
         # Handle file messages

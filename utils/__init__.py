@@ -41,6 +41,10 @@ from .torbox_downloader import (
     download_from_torbox, download_torbox_with_progress, detect_file_type_from_url, get_torbox_metadata
 )
 from .streaming_extractor import StreamingExtractor, StreamingEntry, mark_streaming_entries_completed
+from .webdav_client import (
+    parse_webdav_url, get_webdav_client, reset_webdav_client,
+    TorboxWebDAVClient, WebDAVItem, is_webdav_link, extract_webdav_links
+)
 
 __all__ = [
     'human_size', 'format_eta', 'setup_logger', 'compute_sha256', 'extract_with_password',
@@ -62,5 +66,7 @@ __all__ = [
 ]
 
 __all__ += [
-    'StreamingExtractor', 'StreamingEntry', 'mark_streaming_entries_completed'
+    'StreamingExtractor', 'StreamingEntry', 'mark_streaming_entries_completed',
+    'parse_webdav_url', 'get_webdav_client', 'reset_webdav_client',
+    'TorboxWebDAVClient', 'WebDAVItem', 'is_webdav_link', 'extract_webdav_links'
 ]

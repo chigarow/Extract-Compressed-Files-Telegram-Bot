@@ -5,3 +5,4 @@ psutil
 aiohttp
 torbox_api
 Pillow
+webdav4

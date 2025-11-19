@@ -8,12 +8,14 @@ import logging
 import os
 import time
 import json
+import re
 from typing import Union
 from telethon.errors import FloodWaitError
 from .constants import (
     DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS,
     RETRY_BASE_INTERVAL, STREAMING_EXTRACTION_ENABLED, STREAMING_MIN_FREE_GB,
-    STREAMING_LOW_SPACE_CHECK_INTERVAL, STREAMING_MANIFEST_DIR, TORBOX_DIR
+    STREAMING_LOW_SPACE_CHECK_INTERVAL, STREAMING_MANIFEST_DIR, TORBOX_DIR,
+    WEBDAV_DIR, MEDIA_EXTENSIONS, DATA_DIR
 )
 from .cache_manager import PersistentQueue
 from .constants import DOWNLOAD_QUEUE_FILE, UPLOAD_QUEUE_FILE, RETRY_QUEUE_FILE
@@ -247,6 +249,7 @@ class QueueManager:
         self.client = client  # optional injected client for tests
         self.is_processing = False  # legacy flag used by tests
         self.active_uploads = 0  # tracks uploads currently executing
+        self.processing_archives = set()
         
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
@@ -641,6 +644,14 @@ class QueueManager:
     
     async def _execute_download_task(self, task: dict):
         """Execute a download task with retry mechanism."""
+        task_type = task.get('type')
+        if task_type == 'webdav_walk_download':
+            await self._execute_webdav_walk_task(task)
+            return
+        if task_type == 'webdav_file_download':
+            await self._execute_webdav_file_task(task)
+            return
+
         from .telegram_operations import TelegramOperations, create_download_progress_callback
         from .constants import MAX_RETRY_ATTEMPTS, RETRY_BASE_INTERVAL
         import time
@@ -822,7 +833,184 @@ class QueueManager:
                         os.remove(temp_path)
                 except Exception:
                     pass
-    
+
+    async def _execute_webdav_walk_task(self, task: dict):
+        """Discover remote WebDAV files and enqueue per-file download tasks."""
+        from .webdav_client import get_webdav_client
+
+        remote_path = task.get('remote_path') or '/'
+        display_name = task.get('display_name') or remote_path
+        event = task.get('event')
+        live_event = event and hasattr(event, 'reply') and callable(getattr(event, 'reply'))
+
+        try:
+            client = await get_webdav_client()
+        except Exception as exc:
+            logger.error(f"Failed to initialize WebDAV client: {exc}")
+            if live_event:
+                try:
+                    await event.reply(f'❌ Could not connect to WebDAV: {exc}')
+                except Exception as reply_error:
+                    logger.warning(f"Failed to notify WebDAV error: {reply_error}")
+            return
+
+        discovered = 0
+        try:
+            async for item in client.walk_files(remote_path):
+                relative_path = self._sanitize_webdav_relative_path(item.path)
+                temp_path = os.path.join(WEBDAV_DIR, relative_path)
+                file_task = {
+                    'type': 'webdav_file_download',
+                    'event': event if live_event else None,
+                    'filename': os.path.basename(relative_path) or 'webdav_file',
+                    'remote_path': item.path,
+                    'temp_path': temp_path,
+                    'size_bytes': item.size or 0,
+                    'display_name': display_name
+                }
+                await self.download_queue.put(file_task)
+                self.download_persistent.add_item(file_task)
+                discovered += 1
+        except Exception as exc:
+            logger.error(f"Failed crawling WebDAV path {remote_path}: {exc}")
+            if live_event:
+                try:
+                    await event.reply(f'❌ WebDAV crawl failed for {display_name}: {exc}')
+                except Exception as reply_error:
+                    logger.warning(f"Failed to send crawl error: {reply_error}")
+            return
+
+        logger.info(f"Discovered {discovered} WebDAV files under {display_name}")
+        if live_event:
+            try:
+                if discovered:
+                    await event.reply(f'📁 Queued {discovered} files from {display_name}.')
+                else:
+                    await event.reply(f'ℹ️ No downloadable files found in {display_name}.')
+            except Exception as reply_error:
+                logger.debug(f"Failed to send WebDAV summary: {reply_error}")
+
+    async def _execute_webdav_file_task(self, task: dict):
+        """Download an individual WebDAV file and enqueue upload processing."""
+        from .webdav_client import get_webdav_client
+        from .telegram_operations import create_download_progress_callback
+        import time
+
+        filename = task.get('filename', 'webdav_file')
+        remote_path = task.get('remote_path')
+        temp_path = task.get('temp_path')
+        event = task.get('event')
+        display_name = task.get('display_name') or remote_path
+        live_event = event and hasattr(event, 'reply') and callable(getattr(event, 'reply'))
+
+        if not remote_path or not temp_path:
+            logger.error(f"WebDAV file task missing required data: {filename}")
+            return
+
+        try:
+            client = await get_webdav_client()
+        except Exception as exc:
+            logger.error(f"Failed to initialize WebDAV client: {exc}")
+            if live_event:
+                try:
+                    await event.reply(f'❌ Could not connect to WebDAV: {exc}')
+                except Exception as reply_error:
+                    logger.warning(f"Failed to notify WebDAV error: {reply_error}")
+            return
+
+        status_msg = None
+        if live_event:
+            try:
+                status_msg = await event.reply(f'⬇️ Downloading {filename} from WebDAV...')
+            except Exception as reply_error:
+                logger.warning(f"Could not send WebDAV download status: {reply_error}")
+                status_msg = None
+
+        progress_callback = None
+        if status_msg:
+            start_time = time.time()
+            download_status = {'filename': filename, 'start_time': start_time}
+            progress_callback = create_download_progress_callback(status_msg, download_status, start_time, filename=filename)
+        else:
+            def progress_callback(current, total):
+                if not total:
+                    return
+                pct = int(current * 100 / total)
+                if pct % 20 == 0:
+                    logger.info(f"WebDAV download progress {filename}: {pct}%")
+
+        try:
+            os.makedirs(os.path.dirname(temp_path) or WEBDAV_DIR, exist_ok=True)
+            await client.download_file(remote_path, temp_path, progress_callback=progress_callback)
+            if status_msg:
+                try:
+                    await status_msg.edit(f'✅ Downloaded {filename} from WebDAV. Queuing upload...')
+                except Exception as edit_error:
+                    logger.debug(f"Failed to edit WebDAV download message: {edit_error}")
+        except Exception as exc:
+            logger.error(f"WebDAV download failed for {filename}: {exc}")
+            await self._handle_webdav_download_failure(task, event, exc, live_event)
+            return
+
+        file_ext = os.path.splitext(temp_path)[1].lower()
+        size_bytes = os.path.getsize(temp_path) if os.path.exists(temp_path) else task.get('size_bytes', 0)
+        upload_task = {
+            'type': 'webdav_media_upload',
+            'event': event if live_event else None,
+            'file_path': temp_path,
+            'filename': filename,
+            'size_bytes': size_bytes,
+            'source_webdav_path': remote_path,
+            'retry_count': 0
+        }
+
+        if file_ext in MEDIA_EXTENSIONS:
+            await self._process_direct_media_upload(upload_task)
+        else:
+            upload_task['type'] = 'webdav_document_upload'
+            await self.add_upload_task(upload_task)
+
+    async def _handle_webdav_download_failure(self, task: dict, event, error: Exception, live_event: bool):
+        """Handle retries for failed WebDAV downloads."""
+
+        filename = task.get('filename', 'webdav_file')
+        retry_count = task.get('retry_count', 0) + 1
+        if retry_count <= MAX_RETRY_ATTEMPTS:
+            retry_delay = RETRY_BASE_INTERVAL * (2 ** (retry_count - 1))
+            logger.info(f"Scheduling WebDAV retry {retry_count} for {filename} in {retry_delay}s")
+            retry_task = task.copy()
+            retry_task['retry_count'] = retry_count
+            retry_task['retry_after'] = time.time() + retry_delay
+            await self._add_to_retry_queue(retry_task)
+            if live_event:
+                try:
+                    await event.reply(
+                        f'⚠️ WebDAV download failed for {filename}. Retrying in {retry_delay}s '
+                        f'(attempt {retry_count}/{MAX_RETRY_ATTEMPTS}).'
+                    )
+                except Exception as reply_error:
+                    logger.debug(f"Failed to send retry notification: {reply_error}")
+        else:
+            logger.error(f"WebDAV download permanently failed for {filename}: {error}")
+            if live_event:
+                try:
+                    await event.reply(f'❌ WebDAV download failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts.')
+                except Exception as reply_error:
+                    logger.debug(f"Failed to send permanent failure notification: {reply_error}")
+
+    def _sanitize_webdav_relative_path(self, remote_path: str) -> str:
+        """Generate a filesystem-safe relative path for a remote WebDAV path."""
+        normalized = remote_path.replace('\\', '/').strip('/')
+        if not normalized:
+            return 'root'
+        parts = []
+        for segment in normalized.split('/'):
+            if not segment or segment in ('.', '..'):
+                continue
+            safe = re.sub(r'[^A-Za-z0-9._-]+', '_', segment)
+            parts.append(safe or 'item')
+        return os.path.join(*parts) if parts else 'root'
+
     async def _execute_upload_task(self, task: dict):
         """Execute an upload task."""
         from .telegram_operations import TelegramOperations, ensure_target_entity, get_client
@@ -1194,6 +1382,9 @@ class QueueManager:
                 await telegram_ops.upload_media_grouped(target, validated_files, caption=caption)
                 upload_success = True
                 logger.info(f"✅ Grouped upload successful: {len(validated_files)} {media_type} files")
+            except FloodWaitError:
+                # Re-raise so outer FloodWait handler can schedule retries and preserve files
+                raise
             except Exception as upload_error:
                 upload_success = False
                 error_msg = str(upload_error).lower()
@@ -1221,6 +1412,9 @@ class QueueManager:
                         await telegram_ops.upload_media_file(target, file_path, caption=f"📦 From: {source_archive}")
                         individual_success_count += 1
                         logger.info(f"✅ Individual upload successful: {os.path.basename(file_path)}")
+                    except FloodWaitError:
+                        # Propagate so the outer handler can respect Telegram-required delay
+                        raise
                     except Exception as individual_error:
                         logger.error(f"❌ Individual upload failed for {os.path.basename(file_path)}: {individual_error}")
                 
@@ -2421,7 +2615,7 @@ class QueueManager:
             logger.error(f"Error creating individual upload fallback: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
 
-    def cleanup_old_files(self, max_age_hours: float = 24) -> int:
+    def cleanup_old_files(self, max_age_hours: float = 24, dry_run: bool = False) -> int:
         """Clean up old files and directories from the data directory.
         
         Args:
@@ -2430,28 +2624,36 @@ class QueueManager:
         Returns:
             Number of files removed
         """
-        from .constants import DATA_DIR
         import shutil
         
         removed_count = 0
         cutoff_time = time.time() - (max_age_hours * 3600)
+        protected_names = {
+            'processed_archives.json', 'download_queue.json', 'upload_queue.json',
+            'retry_queue.json', 'current_process.json'
+        }
         
         try:
             for root, dirs, files in os.walk(DATA_DIR):
-                # Skip hidden directories and torbox directory
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'torbox']
+                # Skip hidden directories plus torbox/webdav staging areas
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('torbox', 'webdav')]
                 
                 for file in files:
                     if file.startswith('.'):
+                        continue
+                    if file in protected_names or file.endswith('.session'):
                         continue
                         
                     file_path = os.path.join(root, file)
                     try:
                         if os.path.getmtime(file_path) < cutoff_time:
                             file_size = os.path.getsize(file_path)
-                            os.remove(file_path)
-                            removed_count += 1
-                            logger.info(f"🗑️ Removed old file: {file} ({file_size / 1024 / 1024:.1f}MB)")
+                            if dry_run:
+                                logger.info(f"🗑️ Would remove old file: {file} ({file_size / 1024 / 1024:.1f}MB)")
+                            else:
+                                os.remove(file_path)
+                                removed_count += 1
+                                logger.info(f"🗑️ Removed old file: {file} ({file_size / 1024 / 1024:.1f}MB)")
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to remove {file_path}: {e}")
                         
@@ -2466,7 +2668,6 @@ class QueueManager:
         Returns:
             List of removed directory paths
         """
-        from .constants import DATA_DIR
         import shutil
         
         removed_dirs = []
@@ -2479,28 +2680,21 @@ class QueueManager:
                 # Check for extraction directories (contain extracted files)
                 if (os.path.isdir(item_path) and 
                     not item.startswith('.') and 
-                    item != 'torbox' and
+                    item not in ('torbox', 'webdav') and
                     ('extract' in item.lower() or '_files' in item or len(item) > 20)):
+                    active_archives = getattr(self, 'processing_archives', set()) or set()
+                    if os.path.basename(item_path) in active_archives:
+                        logger.info(f"⏸️ Skipping active extraction directory: {item}")
+                        continue
                     
                     try:
-                        # Check if directory has any recent activity
-                        latest_time = 0
-                        for root, dirs, files in os.walk(item_path):
-                            for file in files:
-                                file_path = os.path.join(root, file)
-                                latest_time = max(latest_time, os.path.getmtime(file_path))
-                        
-                        # If no recent activity (older than 1 hour), consider it orphaned
-                        if latest_time < time.time() - 3600:  # 1 hour
-                            dir_size = sum(os.path.getsize(os.path.join(dirpath, filename))
-                                         for dirpath, dirnames, filenames in os.walk(item_path)
-                                         for filename in filenames)
-                            size_mb = dir_size / (1024 * 1024)
-                            
-                            shutil.rmtree(item_path)
-                            removed_dirs.append(item_path)
-                            logger.info(f"🗑️ Removed orphaned directory: {item} ({size_mb:.1f}MB)")
-                            
+                        dir_size = sum(os.path.getsize(os.path.join(dirpath, filename))
+                                     for dirpath, dirnames, filenames in os.walk(item_path)
+                                     for filename in filenames)
+                        size_mb = dir_size / (1024 * 1024)
+                        shutil.rmtree(item_path)
+                        removed_dirs.append(item_path)
+                        logger.info(f"🗑️ Removed orphaned directory: {item} ({size_mb:.1f}MB)")
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to clean up {item_path}: {e}")
                         
@@ -2819,13 +3013,12 @@ class ProcessingQueue:
         """
         import time
         import shutil
-        from .constants import DATA_DIR, TORBOX_DIR
         
         current_time = time.time()
         max_age_seconds = max_age_hours * 3600
         
         # Directories to clean
-        cleanup_dirs = [DATA_DIR, TORBOX_DIR]
+        cleanup_dirs = [DATA_DIR, TORBOX_DIR, WEBDAV_DIR]
         total_cleaned = 0
         total_size_cleaned = 0
         
@@ -2843,7 +3036,7 @@ class ProcessingQueue:
                     item_path = os.path.join(base_dir, item)
                     
                     # Skip essential files
-                    if item.endswith(('.json', '.log', '.session')) or item == 'torbox':
+                    if item.endswith(('.json', '.log', '.session')) or item in ('torbox', 'webdav'):
                         continue
                     
                     try:

@@ -51,6 +51,11 @@ class Config:
         self.compression_timeout_seconds = self._getint('COMPRESSION_TIMEOUT_SECONDS', 300)
         # Torbox API key for CDN downloads
         self.torbox_api_key = self._get('TORBOX_API_KEY', '')
+        # WebDAV credentials/configs for incremental Torbox downloads
+        self.webdav_username = self._get('WEBDAV_USERNAME', '')
+        self.webdav_password = self._get('WEBDAV_PASSWORD', '')
+        self.webdav_base_url = self._get('WEBDAV_BASE_URL', 'https://webdav.torbox.app')
+        self.webdav_enabled = self._getboolean('WEBDAV_ENABLED', True)
 
     def _get(self, key, fallback=None):
         return self._config.get('DEFAULT', key, fallback=fallback)

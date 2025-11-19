@@ -9,6 +9,7 @@ from config import config
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 TORBOX_DIR = os.path.join(DATA_DIR, 'torbox')
+WEBDAV_DIR = os.path.join(DATA_DIR, 'webdav')
 
 # File extensions
 ARCHIVE_EXTENSIONS = ('.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz')
@@ -56,6 +57,7 @@ FAILED_OPERATIONS_FILE = os.path.join(DATA_DIR, 'failed_operations.json')
 # Ensure data directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(TORBOX_DIR, exist_ok=True)
+os.makedirs(WEBDAV_DIR, exist_ok=True)
 
 # Streaming extraction configuration
 STREAMING_MANIFEST_DIR = os.path.join(DATA_DIR, 'streaming_manifests')

@@ -132,13 +132,18 @@ The script includes intelligent fallback mechanisms and will work with just Pyth
 3.  **Configure the script:**
 
     -   Create a `secrets.properties` file in the root directory.
-    -   Add your Telegram API credentials and target username:
+    -   Add your Telegram API credentials and target username. If you plan to use Torbox WebDAV incremental downloads (recommended for very large archives), configure the WebDAV section as well:
 
         ```ini
         APP_API_ID=YOUR_TELEGRAM_API_ID
         APP_API_HASH=YOUR_TELEGRAM_API_HASH
         ACCOUNT_B_USERNAME=TARGET_USERNAME
-        
+        TORBOX_API_KEY=OPTIONAL_TORBOX_API_KEY
+        WEBDAV_USERNAME=YOUR_TORBOX_USERNAME
+        WEBDAV_PASSWORD=YOUR_TORBOX_PASSWORD
+        WEBDAV_BASE_URL=https://webdav.torbox.app
+        WEBDAV_ENABLED=true
+
         # Optional configuration parameters:
         # MAX_ARCHIVE_GB=6.0
         # DISK_SPACE_FACTOR=2.5

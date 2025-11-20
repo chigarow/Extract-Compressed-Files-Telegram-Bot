@@ -386,6 +386,9 @@ class TestEventSerialization:
         
         # Create a mock event with to_dict method
         event = Mock()
+        event.id = 123
+        event.message = 'test'
+        event.date = '2025-10-17'
         event.to_dict = Mock(return_value={
             'id': 123,
             'message': 'test',

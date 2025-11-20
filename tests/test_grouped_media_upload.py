@@ -137,15 +137,15 @@ class TestGroupedMediaUpload:
             'is_grouped': True
         }
         
-        with patch('utils.telegram_operations.TelegramOperations') as mock_tg_ops_class:
+        with patch('utils.queue_manager.TelegramOperations') as mock_tg_ops_class:
             mock_tg_ops = MagicMock()
             mock_tg_ops.upload_media_grouped = AsyncMock()
             mock_tg_ops.upload_media_file = AsyncMock()
             mock_tg_ops_class.return_value = mock_tg_ops
             
-            with patch('utils.telegram_operations.get_client'), \
-                 patch('utils.telegram_operations.ensure_target_entity'), \
-                 patch('utils.cache_manager.CacheManager'), \
+            with patch('utils.queue_manager.get_client'), \
+                 patch('utils.queue_manager.ensure_target_entity'), \
+                 patch('utils.queue_manager.CacheManager'), \
                  patch('utils.media_processing.needs_video_processing', return_value=False):
                 
                 await queue_manager._execute_grouped_upload(grouped_task)
@@ -177,14 +177,14 @@ class TestGroupedMediaUpload:
             'is_grouped': True
         }
         
-        with patch('utils.telegram_operations.TelegramOperations') as mock_tg_ops_class:
+        with patch('utils.queue_manager.TelegramOperations') as mock_tg_ops_class:
             mock_tg_ops = MagicMock()
             mock_tg_ops.upload_media_grouped = AsyncMock()
             mock_tg_ops_class.return_value = mock_tg_ops
             
-            with patch('utils.telegram_operations.get_client'), \
-                 patch('utils.telegram_operations.ensure_target_entity'), \
-                 patch('utils.cache_manager.CacheManager'), \
+            with patch('utils.queue_manager.get_client'), \
+                 patch('utils.queue_manager.ensure_target_entity'), \
+                 patch('utils.queue_manager.CacheManager'), \
                  patch('utils.media_processing.needs_video_processing', return_value=False):
                 
                 await queue_manager._execute_grouped_upload(grouped_task)
@@ -213,14 +213,15 @@ class TestGroupedMediaUpload:
         flood_error = FloodWaitError(None)
         flood_error.seconds = 300  # 5 minutes
         
-        with patch('utils.telegram_operations.TelegramOperations') as mock_tg_ops_class:
+        with patch('utils.queue_manager.TelegramOperations') as mock_tg_ops_class:
             mock_tg_ops = MagicMock()
             mock_tg_ops.upload_media_grouped = AsyncMock(side_effect=flood_error)
+            mock_tg_ops.upload_media_file = AsyncMock()
             mock_tg_ops_class.return_value = mock_tg_ops
             
-            with patch('utils.telegram_operations.get_client'), \
-                 patch('utils.telegram_operations.ensure_target_entity'), \
-                 patch('utils.cache_manager.CacheManager'), \
+            with patch('utils.queue_manager.get_client'), \
+                 patch('utils.queue_manager.ensure_target_entity'), \
+                 patch('utils.queue_manager.CacheManager'), \
                  patch('utils.media_processing.needs_video_processing', return_value=False), \
                  patch.object(queue_manager, '_add_to_retry_queue', new=AsyncMock()) as mock_retry:
                 
@@ -238,6 +239,50 @@ class TestGroupedMediaUpload:
                 # Files should NOT be deleted
                 for file_path in test_files['images']:
                     assert os.path.exists(file_path), f"File should not be deleted on rate limit: {file_path}"
+
+                # Ensure fallback individual uploads were never attempted
+                mock_tg_ops.upload_media_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_individual_fallback_respects_rate_limit(self, queue_manager, test_files, mock_event):
+        """Fallback individual uploads should requeue when FloodWaitError occurs."""
+
+        grouped_task = {
+            'type': 'grouped_media',
+            'media_type': 'images',
+            'event': mock_event,
+            'file_paths': test_files['images'].copy(),
+            'filename': 'test.zip - Images (3 files)',
+            'source_archive': 'test.zip',
+            'is_grouped': True,
+            'retry_count': 0
+        }
+
+        flood_error = FloodWaitError(None)
+        flood_error.seconds = 120
+
+        with patch('utils.queue_manager.TelegramOperations') as mock_tg_ops_class:
+            mock_tg_ops = MagicMock()
+            # Force grouped upload to fail with generic error so fallback kicks in
+            mock_tg_ops.upload_media_grouped = AsyncMock(side_effect=RuntimeError('group fail'))
+            # First individual upload hits FloodWait
+            mock_tg_ops.upload_media_file = AsyncMock(side_effect=flood_error)
+            mock_tg_ops_class.return_value = mock_tg_ops
+
+            with patch('utils.queue_manager.get_client'), \
+                 patch('utils.queue_manager.ensure_target_entity'), \
+                 patch('utils.queue_manager.CacheManager'), \
+                 patch('utils.media_processing.needs_video_processing', return_value=False), \
+                 patch.object(queue_manager, '_add_to_retry_queue', new=AsyncMock()) as mock_retry:
+
+                await queue_manager._execute_grouped_upload(grouped_task)
+
+                # Should schedule retry due to FloodWait from fallback upload
+                mock_retry.assert_called_once()
+                retry_task = mock_retry.call_args[0][0]
+                assert retry_task['retry_count'] == 1
+                # Only first individual upload should have been attempted before propagation
+                assert mock_tg_ops.upload_media_file.call_count == 1
     
     @pytest.mark.asyncio
     async def test_grouped_upload_cleans_up_on_success(self, queue_manager, test_files, mock_event):
@@ -253,14 +298,14 @@ class TestGroupedMediaUpload:
             'is_grouped': True
         }
         
-        with patch('utils.telegram_operations.TelegramOperations') as mock_tg_ops_class:
+        with patch('utils.queue_manager.TelegramOperations') as mock_tg_ops_class:
             mock_tg_ops = MagicMock()
             mock_tg_ops.upload_media_grouped = AsyncMock()
             mock_tg_ops_class.return_value = mock_tg_ops
             
-            with patch('utils.telegram_operations.get_client'), \
-                 patch('utils.telegram_operations.ensure_target_entity'), \
-                 patch('utils.cache_manager.CacheManager'), \
+            with patch('utils.queue_manager.get_client'), \
+                 patch('utils.queue_manager.ensure_target_entity'), \
+                 patch('utils.queue_manager.CacheManager'), \
                  patch('utils.media_processing.needs_video_processing', return_value=False):
                 
                 # Verify files exist before
@@ -287,7 +332,7 @@ class TestGroupedMediaUpload:
             'is_grouped': True
         }
         
-        with patch('utils.telegram_operations.TelegramOperations') as mock_tg_ops_class:
+        with patch('utils.queue_manager.TelegramOperations') as mock_tg_ops_class:
             mock_tg_ops = MagicMock()
             mock_tg_ops.upload_media_grouped = AsyncMock()
             mock_tg_ops_class.return_value = mock_tg_ops
@@ -319,14 +364,14 @@ class TestGroupedMediaUpload:
             'is_grouped': True
         }
         
-        with patch('utils.telegram_operations.TelegramOperations') as mock_tg_ops_class:
+        with patch('utils.queue_manager.TelegramOperations') as mock_tg_ops_class:
             mock_tg_ops = MagicMock()
             mock_tg_ops.upload_media_grouped = AsyncMock()
             mock_tg_ops_class.return_value = mock_tg_ops
             
-            with patch('utils.telegram_operations.get_client'), \
-                 patch('utils.telegram_operations.ensure_target_entity'), \
-                 patch('utils.cache_manager.CacheManager'), \
+            with patch('utils.queue_manager.get_client'), \
+                 patch('utils.queue_manager.ensure_target_entity'), \
+                 patch('utils.queue_manager.CacheManager'), \
                  patch('utils.media_processing.needs_video_processing', return_value=False):
                 
                 # Upload first group

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import unittest
 """
 Test upload task fixes for null message handling and file cleanup timing.
 """
@@ -22,11 +23,11 @@ except ImportError as e:
     sys.exit(0)
 
 
-class TestUploadTaskFixes:
+class TestUploadTaskFixes(unittest.IsolatedAsyncioTestCase):
     """Test cases for upload task error handling fixes."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
+
+    async def asyncSetUp(self):
+        """Set up test fixtures asynchronously."""
         self.queue_manager = QueueManager()
         
     def create_temp_file(self):

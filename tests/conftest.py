@@ -20,7 +20,7 @@ TEST_DATA_DIR.mkdir(exist_ok=True)
 SAMPLE_FILES = {
     "test.txt": b"Hello, this is a test file content.",
     "test.pdf": b"%PDF-1.4\n%Test PDF content",
-    "test.mp4": b"\x00\x00\x00\x20ftypmp41",  # Minimal MP4 header
+    "test.mp4": b"\x00\x00\x00 20ftypmp41",  # Minimal MP4 header
     "test.zip": b"PK\x03\x04",  # ZIP file signature
     "test.rar": b"Rar!\x1a\x07\x00",  # RAR file signature
     "test.7z": b"7z\xbc\xaf'\x1c",  # 7z file signature
@@ -98,6 +98,36 @@ class MockTelegramClient:
         """Mock call method"""
         mock_result = Mock()
         mock_result.bytes = b"Mock download chunk"
+        return mock_result
+
+    async def get_entity(self, entity_id):
+        """Mock get entity"""
+        mock_entity = Mock()
+        mock_entity.id = 123456789
+        mock_entity.username = "mock_user"
+        return mock_entity
+
+    async def edit_message(self, entity, message, text, **kwargs):
+        """Mock edit message"""
+        mock_message = Mock()
+        mock_message.id = message if isinstance(message, int) else message.id
+        mock_message.text = text
+        return mock_message
+
+    async def delete_messages(self, entity, message_ids, **kwargs):
+        """Mock delete messages"""
+        return [1]
+
+    async def upload_file(self, file, **kwargs):
+        """Mock upload file"""
+        mock_file = Mock()
+        mock_file.id = 98765
+        mock_file.name = os.path.basename(file) if isinstance(file, str) else "mock_file"
+        return mock_file
+
+    def is_connected(self):
+        """Mock is_connected"""
+        return self.connected
         return mock_result
 
 class MockDocument:

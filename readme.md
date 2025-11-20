@@ -4,38 +4,38 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 
 ## Features
 
-- **Interactive Chat-Based Authentication**: First-time login is handled through Telegram's "Saved Messages" chat, eliminating the need for terminal input. Perfect for background processes and non-interactive environments. See [INTERACTIVE_LOGIN.md](INTERACTIVE_LOGIN.md) for details.
-- **User Account Based Access**: Uses a user account (not a bot token) for authentication, controlled by specifying a target username in the configuration.
-- **Automatic Extraction**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz. Uses multiple extraction methods with intelligent fallback for maximum compatibility across different platforms.
-- **Torbox CDN Downloads**: Automatically detects and downloads files from Torbox CDN links sent in text messages.
-- **Direct Media Upload**: Send images/videos directly to the user account and they will be re-uploaded to the target user as media in the Media tab.
-- **Media Filtering**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm, and many others).
-- **Duplicate Detection**: Avoids reprocessing archives that have been previously processed by maintaining a cache of file hashes.
-- **Efficient Storage Management**: Deletes the original compressed file and the extracted files after uploading to save storage space.
-- **Password Protected Archive Support**: Handles password-protected archives with a simple command interface.
-- **Unsupported Video Format Conversion**: All unsupported video formats (.ts, .mkv, .avi, .mov, .wmv, .flv, and many others) are automatically converted to MP4 format to ensure proper playback in Telegram, even when transcoding is disabled.
-- **Proper Video Attributes**: Videos now have correct duration and thumbnail for proper display in Telegram (fixes black thumbnails and 00:00 duration).
-- **Media Tab Support**: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
-- **Grouped Media Uploads**: Uploads images and videos as separate grouped albums with archive name as caption. **NEW: Dramatically reduces rate limiting by batching files (97-99% fewer API calls).**
-- **Automatic Image Compression**: **NEW: Automatically compresses photos exceeding Telegram's 10MB limit using iterative quality reduction, ensuring all images upload successfully without manual intervention.**
-- **Intelligent Rate Limit Handling**: Comprehensive FloodWaitError handling that automatically respects Telegram's rate limits, preserves files during wait periods, and retries indefinitely until successful. **NEW: No more failed uploads due to rate limiting.**
-- **Sequential Processing**: Fully sequential file processing (download → compress → upload → cleanup) to prevent memory issues on low-resource devices like Android Termux. Only one file is processed at a time to minimize memory usage.
-- **Crash Recovery System**: Current processing state is saved to `current_process.json` every minute to persist across restarts, ensuring graceful recovery after crashes.
-- **Automatic Retry for Failed Operations**: Failed operations (due to FloodWaitError or other network issues) are automatically saved to `failed_operations.json` and retried every 30 minutes.
-- **FastTelethon Parallel Downloads**: Automatic 10-20x speed acceleration for large files using parallel MTProto connections.
-- **Optimized Download Speed**: Uses larger chunk sizes for Telegram Premium users to maximize download performance.
-- **Progress Tracking**: Provides real-time status updates during download, extraction, and upload processes.
-- **Configurable Limits**: Adjustable settings for maximum file size, disk space requirements, and concurrent processing.
-- **Queue Monitoring**: Built-in status command to check current processing state.
-- **Sequential File Processing**: Files are processed one at a time (download → compress → upload → cleanup) to minimize memory usage on low-resource devices.
-- **Network Monitoring**: WiFi-only mode with intelligent network detection for mobile data conservation.
-- **Battery Monitoring**: Built-in battery status monitoring for Termux users.
-- **Compression Timeout Control**: Configurable timeout settings for video compression operations.
-- **System Resource Monitoring**: Real-time CPU, memory, and disk usage tracking.
-- **Sender Validation & Security**: **NEW: Only processes messages from the configured `account_b_username`, preventing unauthorized access.** All messages from other users are blocked and logged for security auditing. This ensures that only your designated target user can trigger downloads, uploads, and commands.
-- **Automatic File Cleanup**: **NEW: Manual cleanup commands to remove old files and orphaned directories, recovering disk space.** Includes safety confirmations and protected file lists. See [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md) for details.
-- **Organized File Structure**: **NEW: Dedicated `data/torbox/` directory for all Torbox downloads, keeping the main data directory clean and organized.**
-- **System Monitoring Tools**: **NEW: Built-in monitoring script (`monitor_system.py`) provides detailed reports on disk usage, old files, and cleanup recommendations.**
+- **[Interactive Chat-Based Authentication](.documentation_feature/interactive-chat-based-authentication.md)**: First-time login is handled through Telegram's "Saved Messages" chat, eliminating the need for terminal input. Perfect for background processes and non-interactive environments. See [INTERACTIVE_LOGIN.md](INTERACTIVE_LOGIN.md) for details.
+- **[User Account Based Access](.documentation_feature/user-account-based-access.md)**: Uses a user account (not a bot token) for authentication, controlled by specifying a target username in the configuration.
+- **[Automatic Extraction](.documentation_feature/automatic-extraction.md)**: Supports a wide range of compressed file formats, including zip, rar, 7z, tar, gz, bz2, and xz. Uses multiple extraction methods with intelligent fallback for maximum compatibility across different platforms.
+- **[Torbox CDN Downloads](.documentation_feature/torbox-cdn-downloads.md)**: Automatically detects and downloads files from Torbox CDN links sent in text messages.
+- **[Direct Media Upload](.documentation_feature/direct-media-upload.md)**: Send images/videos directly to the user account and they will be re-uploaded to the target user as media in the Media tab.
+- **[Media Filtering](.documentation_feature/media-filtering.md)**: Automatically filters and forwards only photo and video files (.png, .jpg, .jpeg, .bmp, .mp4, .mkv, .avi, .mov, .webm, and many others).
+- **[Duplicate Detection](.documentation_feature/duplicate-detection.md)**: Avoids reprocessing archives that have been previously processed by maintaining a cache of file hashes.
+- **[Efficient Storage Management](.documentation_feature/efficient-storage-management.md)**: Deletes the original compressed file and the extracted files after uploading to save storage space.
+- **[Password Protected Archive Support](.documentation_feature/password-protected-archive-support.md)**: Handles password-protected archives with a simple command interface.
+- **[Unsupported Video Format Conversion](.documentation_feature/unsupported-video-format-conversion.md)**: All unsupported video formats (.ts, .mkv, .avi, .mov, .wmv, .flv, and many others) are automatically converted to MP4 format to ensure proper playback in Telegram, even when transcoding is disabled.
+- **[Proper Video Attributes](.documentation_feature/proper-video-attributes.md)**: Videos now have correct duration and thumbnail for proper display in Telegram (fixes black thumbnails and 00:00 duration).
+- **[Media Tab Support](.documentation_feature/media-tab-support.md)**: Files are uploaded as native media types (photos/videos) instead of documents to appear in the Media tab.
+- **[Grouped Media Uploads](.documentation_feature/grouped-media-uploads.md)**: Uploads images and videos as separate grouped albums with archive name as caption. **NEW: Dramatically reduces rate limiting by batching files (97-99% fewer API calls).**
+- **[Automatic Image Compression](.documentation_feature/automatic-image-compression.md)**: **NEW: Automatically compresses photos exceeding Telegram's 10MB limit using iterative quality reduction, ensuring all images upload successfully without manual intervention.**
+- **[Intelligent Rate Limit Handling](.documentation_feature/intelligent-rate-limit-handling.md)**: Comprehensive FloodWaitError handling that automatically respects Telegram's rate limits, preserves files during wait periods, and retries indefinitely until successful. **NEW: No more failed uploads due to rate limiting.**
+- **[Sequential Processing](.documentation_feature/sequential-processing.md)**: Fully sequential file processing (download → compress → upload → cleanup) to prevent memory issues on low-resource devices like Android Termux. Only one file is processed at a time to minimize memory usage.
+- **[Crash Recovery System](.documentation_feature/crash-recovery-system.md)**: Current processing state is saved to `current_process.json` every minute to persist across restarts, ensuring graceful recovery after crashes.
+- **[Automatic Retry for Failed Operations](.documentation_feature/automatic-retry-for-failed-operations.md)**: Failed operations (due to FloodWaitError or other network issues) are automatically saved to `failed_operations.json` and retried every 30 minutes.
+- **[FastTelethon Parallel Downloads](.documentation_feature/fasttelethon-parallel-downloads.md)**: Automatic 10-20x speed acceleration for large files using parallel MTProto connections.
+- **[Optimized Download Speed](.documentation_feature/optimized-download-speed.md)**: Uses larger chunk sizes for Telegram Premium users to maximize download performance.
+- **[Progress Tracking](.documentation_feature/progress-tracking.md)**: Provides real-time status updates during download, extraction, and upload processes.
+- **[Configurable Limits](.documentation_feature/configurable-limits.md)**: Adjustable settings for maximum file size, disk space requirements, and concurrent processing.
+- **[Queue Monitoring](.documentation_feature/queue-monitoring.md)**: Built-in status command to check current processing state.
+- **[Sequential File Processing](.documentation_feature/sequential-file-processing.md)**: Files are processed one at a time (download → compress → upload → cleanup) to minimize memory usage on low-resource devices.
+- **[Network Monitoring](.documentation_feature/network-monitoring.md)**: WiFi-only mode with intelligent network detection for mobile data conservation.
+- **[Battery Monitoring](.documentation_feature/battery-monitoring.md)**: Built-in battery status monitoring for Termux users.
+- **[Compression Timeout Control](.documentation_feature/compression-timeout-control.md)**: Configurable timeout settings for video compression operations.
+- **[System Resource Monitoring](.documentation_feature/system-resource-monitoring.md)**: Real-time CPU, memory, and disk usage tracking.
+- **[Sender Validation & Security](.documentation_feature/sender-validation-security.md)**: **NEW: Only processes messages from the configured `account_b_username`, preventing unauthorized access.** All messages from other users are blocked and logged for security auditing. This ensures that only your designated target user can trigger downloads, uploads, and commands.
+- **[Automatic File Cleanup](.documentation_feature/automatic-file-cleanup.md)**: **NEW: Manual cleanup commands to remove old files and orphaned directories, recovering disk space.** Includes safety confirmations and protected file lists. See [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md) for details.
+- **[Organized File Structure](.documentation_feature/organized-file-structure.md)**: **NEW: Dedicated `data/torbox/` directory for all Torbox downloads, keeping the main data directory clean and organized.**
+- **[System Monitoring Tools](.documentation_feature/system-monitoring-tools.md)**: **NEW: Built-in monitoring script (`monitor_system.py`) provides detailed reports on disk usage, old files, and cleanup recommendations.**
 
 ## Security
 

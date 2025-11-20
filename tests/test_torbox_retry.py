@@ -54,12 +54,15 @@ class TestTorboxRetryMechanism:
         try:
             # Create mock response
             mock_response = create_mock_response()
-            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-            mock_response.__aexit__ = AsyncMock(return_value=None)
             
-            # Create mock session - NOTE: get() is a regular Mock, not AsyncMock
+            # Create async context manager for the response
+            mock_response_cm = AsyncMock()
+            mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response_cm.__aexit__ = AsyncMock(return_value=None)
+            
+            # Create mock session - get() must return the async context manager
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
+            mock_session.get = Mock(return_value=mock_response_cm)
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
             
@@ -96,18 +99,19 @@ class TestTorboxRetryMechanism:
                         raise aiohttp.ClientError("Connection reset")
                     
                     mock_cm = AsyncMock()
-                    mock_cm.__aenter__.side_effect = lambda: fail()
+                    mock_cm.__aenter__ = AsyncMock(side_effect=fail)
+                    mock_cm.__aexit__ = AsyncMock(return_value=None)
                     return mock_cm
                 
                 # Third attempt succeeds
                 mock_response = create_mock_response()
                 mock_cm = AsyncMock()
-                mock_cm.__aenter__.return_value = mock_response
-                mock_cm.__aexit__.return_value = None
+                mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+                mock_cm.__aexit__ = AsyncMock(return_value=None)
                 return mock_cm
             
             mock_session = AsyncMock()
-            mock_session.get.side_effect = mock_get_side_effect
+            mock_session.get = Mock(side_effect=mock_get_side_effect)
             
             session_cm = AsyncMock()
             session_cm.__aenter__.return_value = mock_session
@@ -142,11 +146,12 @@ class TestTorboxRetryMechanism:
             
             def mock_get_side_effect(*args, **kwargs):
                 mock_cm = AsyncMock()
-                mock_cm.__aenter__.side_effect = lambda: fail()
+                mock_cm.__aenter__ = AsyncMock(side_effect=fail)
+                mock_cm.__aexit__ = AsyncMock(return_value=None)
                 return mock_cm
             
             mock_session = AsyncMock()
-            mock_session.get.side_effect = mock_get_side_effect
+            mock_session.get = Mock(side_effect=mock_get_side_effect)
             
             session_cm = AsyncMock()
             session_cm.__aenter__.return_value = mock_session
@@ -185,11 +190,12 @@ class TestTorboxRetryMechanism:
             
             def mock_get_side_effect(*args, **kwargs):
                 mock_cm = AsyncMock()
-                mock_cm.__aenter__.side_effect = lambda: fail()
+                mock_cm.__aenter__ = AsyncMock(side_effect=fail)
+                mock_cm.__aexit__ = AsyncMock(return_value=None)
                 return mock_cm
             
             mock_session = AsyncMock()
-            mock_session.get.side_effect = mock_get_side_effect
+            mock_session.get = Mock(side_effect=mock_get_side_effect)
             
             session_cm = AsyncMock()
             session_cm.__aenter__.return_value = mock_session

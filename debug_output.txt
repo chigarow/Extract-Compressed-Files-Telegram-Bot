@@ -1,0 +1,84 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.9, pytest-8.4.2, pluggy-1.6.0 -- /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/venv/bin/python3.13
+cachedir: .pytest_cache
+rootdir: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles
+configfile: pytest.ini
+plugins: asyncio-1.2.0, anyio-4.11.0, cov-7.0.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/test_flood_wait_handling.py::TestFloodWaitErrorHandling::test_flood_wait_error_caught_and_handled DEBUG: Caught exception type: <class 'ConnectionError'>
+DEBUG: Is instance of FloodWaitError? False
+DEBUG: Exception module: builtins
+FAILED
+
+=================================== FAILURES ===================================
+_____ TestFloodWaitErrorHandling.test_flood_wait_error_caught_and_handled ______
+
+self = <tests.test_flood_wait_handling.TestFloodWaitErrorHandling object at 0x107779950>
+queue_manager = <utils.queue_manager.QueueManager object at 0x1049eb9d0>
+upload_task = {'event': <MagicMock id='4379432272'>, 'file_path': '/private/var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/pytest-o...ulcahyo/pytest-17/test_flood_wait_error_caught_a0/test_video.mp4', 'filename': 'test_video.mp4', 'retry_count': 0, ...}
+
+    @pytest.mark.asyncio
+    async def test_flood_wait_error_caught_and_handled(self, queue_manager, upload_task):
+        """Test that FloodWaitError is caught and handled properly."""
+    
+        # Create FloodWaitError with specific wait time
+        flood_error = FloodWaitError(None)
+        flood_error.seconds = 1678  # 28 minutes as in the user's log
+    
+        # Mock the TelegramOperations to raise FloodWaitError
+        with patch('utils.queue_manager.TelegramOperations') as mock_telegram_ops:
+            mock_ops_instance = MagicMock()
+            mock_ops_instance.upload_media_file = AsyncMock(side_effect=flood_error)
+            mock_telegram_ops.return_value = mock_ops_instance
+    
+            # Mock other dependencies
+            with patch('utils.queue_manager.get_client'), \
+                 patch('utils.queue_manager.ensure_target_entity'), \
+                 patch('utils.queue_manager.CacheManager'):
+    
+                # Execute the upload task
+                await queue_manager._execute_upload_task(upload_task)
+    
+        # Verify that the task was added to retry queue
+        # The file should still exist (not deleted)
+        assert os.path.exists(upload_task['file_path']), "File should not be deleted on FloodWaitError"
+    
+        # Verify that reply was called with informative message
+>       upload_task['event'].reply.assert_called_once()
+
+tests/test_flood_wait_handling.py:83: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <AsyncMock name='mock.reply' id='4420327408'>
+
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'reply' to have been called once. Called 2 times.
+E           Calls: [call('📤 Uploading test_video.mp4...'),
+E            call('⚠️ Upload failed for test_video.mp4. Retrying in 5s... (attempt 2/5)')].
+
+/opt/homebrew/Cellar/python@3.13/3.13.9_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/mock.py:958: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    extractor:queue_manager.py:1224 Upload failed for test_video.mp4 (attempt 1): Cannot send requests while disconnected
+ERROR    extractor:queue_manager.py:2088 Failed to load retry queue: Expecting value: line 5 column 13 (char 61)
+ERROR    extractor:queue_manager.py:2100 Failed to save retry queue: Object of type MagicMock is not JSON serializable
+=============================== warnings summary ===============================
+venv/lib/python3.13/site-packages/telethon/helpers.py:432
+  /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/venv/lib/python3.13/site-packages/telethon/helpers.py:432: DeprecationWarning: There is no current event loop
+    return asyncio.get_event_loop_policy().get_event_loop()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_flood_wait_handling.py::TestFloodWaitErrorHandling::test_flood_wait_error_caught_and_handled - AssertionError: Expected 'reply' to have been called once. Called 2 times.
+Calls: [call('📤 Uploading test_video.mp4...'),
+ call('⚠️ Upload failed for test_video.mp4. Retrying in 5s... (attempt 2/5)')].
+========================= 1 failed, 1 warning in 0.56s =========================

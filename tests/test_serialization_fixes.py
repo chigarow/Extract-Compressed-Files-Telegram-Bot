@@ -338,8 +338,8 @@ class TestIntegrationFixes(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
-    @patch('utils.queue_manager.compress_video_for_telegram')
-    @patch('utils.queue_manager.needs_video_processing')
+    @patch('utils.media_processing.compress_video_for_telegram')
+    @patch('utils.media_processing.needs_video_processing')
     def test_video_processing_path_generation(self, mock_needs_processing, mock_compress):
         """Test that video processing uses correct path generation."""
         mock_needs_processing.return_value = True

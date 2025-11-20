@@ -14,6 +14,9 @@ import pytest
 import asyncio
 import os
 import tempfile
+import zipfile
+import shutil
+import importlib
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from utils.torbox_downloader import (
     is_torbox_link,
@@ -693,6 +696,71 @@ class TestTorboxIntegration:
         
         assert file_type == 'video', "Should detect as video"
         assert filename.endswith('.mp4'), "Should have .mp4 extension"
+
+    @pytest.mark.asyncio
+    async def test_torbox_zip_download_and_stream_extraction(self, tmp_path):
+        """
+        Tests the full end-to-end flow for a Torbox ZIP file, ensuring it
+        is downloaded and processed via the streaming extraction pipeline.
+        """
+        # 1. Arrange
+        torbox_dir = tmp_path / "torbox"
+        torbox_dir.mkdir()
+        manifest_dir = tmp_path / "manifests"
+        manifest_dir.mkdir()
+
+        # Create a fake ZIP file to be "downloaded"
+        archive_name = "test_archive.zip"
+        zip_path = tmp_path / archive_name
+        with zipfile.ZipFile(zip_path, 'w') as zf:
+            zf.writestr("image1.jpg", "fake image data")
+            zf.writestr("video1.mp4", "fake video data")
+            zf.writestr("readme.txt", "some text")
+
+        # Mock event and queue manager
+        mock_event = AsyncMock()
+        mock_event.reply = AsyncMock()
+        mock_event.edit = AsyncMock()
+
+        # We need a real QueueManager to test the method, but mock its upload dependency
+        from utils.queue_manager import QueueManager
+        queue_manager = QueueManager()
+        queue_manager.add_upload_task = AsyncMock()
+
+        # This is the main function we are testing from extract-compressed-files
+        extract_compressed_files = importlib.import_module("extract-compressed-files")
+        
+        # Create a fake downloaded file
+        downloaded_archive_path = torbox_dir / archive_name
+        shutil.copy(zip_path, downloaded_archive_path)
+
+        # Create the task to be processed
+        processing_task = {
+            'type': 'extract_and_upload',
+            'temp_archive_path': str(downloaded_archive_path),
+            'filename': archive_name,
+            'event': mock_event
+        }
+
+        # Patch all external dependencies
+        with patch('utils.queue_manager.TORBOX_DIR', str(torbox_dir)), \
+             patch('utils.constants.STREAMING_MANIFEST_DIR', str(manifest_dir)):
+            
+            # 2. Act
+            await queue_manager._process_extraction_and_upload(processing_task)
+
+            # 3. Assert
+            # Verify that add_upload_task was called for the media files
+            assert queue_manager.add_upload_task.call_count > 0
+            
+            # Inspect the calls to ensure they were for streaming batches
+            first_call_args = queue_manager.add_upload_task.call_args_list[0][0][0]
+            assert first_call_args['type'] == 'grouped_media'
+            assert first_call_args['cleanup_file_paths'] is True
+            assert 'streaming_manifest' in first_call_args
+            
+            # Verify the original downloaded archive was cleaned up
+            assert not downloaded_archive_path.exists()
 
 
 class TestEdgeCases:

@@ -20,7 +20,7 @@ from utils.cache_manager import ProcessManager
 
 # Try to import network_monitor, create mock if not available
 try:
-    from network_monitor import NetworkMonitor, NetworkType
+    from utils.network_monitor import NetworkMonitor, NetworkType
 except ImportError:
     # Create mock NetworkMonitor and NetworkType for testing
     class NetworkType:
@@ -274,15 +274,7 @@ class TestErrorHandling:
         with patch('utils.queue_manager.DOWNLOAD_QUEUE_FILE', os.path.join(temp_dir, 'concurrent_failures.json')):
             queue_manager = QueueManager(mock_client)
             
-            # Add multiple tasks
-            task_ids = []
-            for i in range(5):
-                task_id = await queue_manager.add_download_task(
-                    mock_document, f"/test/concurrent_{i}.pdf"
-                )
-                task_ids.append(task_id)
-            
-            # Mock download to fail for all tasks
+            # Mock download to fail for all tasks - SET BEFORE adding tasks
             failure_count = 0
             async def mock_failing_download(task):
                 nonlocal failure_count
@@ -291,9 +283,17 @@ class TestErrorHandling:
             
             queue_manager._execute_download_task = mock_failing_download
             
-            # Start processing
+            # Add multiple tasks (processor will auto-start and use the mock)
+            task_ids = []
+            for i in range(5):
+                task_id = await queue_manager.add_download_task(
+                    mock_document, f"/test/concurrent_{i}.pdf"
+                )
+                task_ids.append(task_id)
+            
+            # Ensure processing started
             await queue_manager.start_processing()
-            await asyncio.sleep(1)  # Allow failures to occur
+            await asyncio.sleep(1.5)  # Allow failures to occur
             await queue_manager.stop_processing()
             
             # Verify all tasks handled failures

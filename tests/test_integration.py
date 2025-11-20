@@ -25,303 +25,241 @@ from utils.constants import *
 
 class TestRealQueueProcessing:
     """Test actual queue processing workflows"""
-    
+
     @pytest.fixture
-    def temp_workspace(self):
-        """Create a temporary workspace for realistic testing"""
-        temp_dir = tempfile.mkdtemp(prefix="integration_test_")
-        # Create data directory structure
-        data_dir = os.path.join(temp_dir, 'data')
-        os.makedirs(data_dir, exist_ok=True)
-        
-        yield temp_dir, data_dir
-        
-        # Cleanup
-        shutil.rmtree(temp_dir)
+    def queue_manager(self, monkeypatch, temp_workspace):
+        """Creates a QueueManager with patched file paths."""
+        temp_dir, data_dir = temp_workspace
+        monkeypatch.setattr('utils.constants.DATA_DIR', data_dir)
+        monkeypatch.setattr('utils.constants.DOWNLOAD_QUEUE_FILE', os.path.join(data_dir, 'download_queue.json'))
+        monkeypatch.setattr('utils.constants.UPLOAD_QUEUE_FILE', os.path.join(data_dir, 'upload_queue.json'))
+        return QueueManager()
     
-    @pytest.fixture
-    def mock_telegram_client(self):
-        """Create a realistic mock Telegram client"""
-        client = Mock()
-        client.is_connected = Mock(return_value=True)
-        client.connect = AsyncMock()
-        client.disconnect = AsyncMock()
+    @pytest.mark.asyncio
+    async def test_full_download_queue_workflow(self, queue_manager, mock_telegram_client, temp_workspace):
+        """Test complete download queue processing workflow"""
+        temp_dir, data_dir = temp_workspace
         
-        # Mock download with realistic file creation
-        async def mock_download_media(document, file, progress_callback=None):
-            # Simulate progress updates
-            if progress_callback:
-                total_size = getattr(document, 'size', 1024 * 1024)  # 1MB default
-                for i in range(0, total_size, total_size // 10):
-                    progress_callback(i, total_size)
-                    await asyncio.sleep(0.01)  # Simulate time
-                progress_callback(total_size, total_size)  # Complete
+        # Create mock message
+        mock_document = {
+            "file_name": "test_video.mp4",
+            "size": 2 * 1024 * 1024,
+            "mime_type": "video/mp4"
+        }
+        mock_message = {
+            "document": mock_document
+        }
+
+        # Track progress
+        progress_updates = []
+        def track_progress(current, total):
+            progress_updates.append((current, total))
+
+        # Add download task
+        output_path = os.path.join(data_dir, "downloaded_video.mp4")
+        task_data = {
+            'message': mock_message,
+            'temp_path': output_path,
+            'progress_callback': track_progress
+        }
+
+        with patch('utils.queue_manager.get_client', return_value=mock_telegram_client):
+            await queue_manager.add_download_task(task_data)
+
+            # Process queue (simulate one iteration)
+            task = await queue_manager.download_queue.get()
+            print(f"DEBUG: task = {task}")
+
+            # Execute download task manually
+            try:
+                client = mock_telegram_client
+                document = Mock()
+                document.size = task['document']['file']['size']
+                temp_path = task['output_path']
+                progress_callback = task.get('progress_callback')
+
+                # Ensure output directory exists
+                os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+
+                # Download file
+                result = await client.download_media(
+                    document,
+                    temp_path,
+                    progress_callback=progress_callback
+                )
+
+                # Verify file was created
+                assert os.path.exists(temp_path)
+                assert os.path.getsize(temp_path) == document.size
+
+                # Verify progress was tracked
+                assert len(progress_updates) > 0
+                assert progress_updates[-1] == (document.size, document.size)
+
+                print(f"✅ Download completed: {temp_path}")
+                print(f"📊 Progress updates: {len(progress_updates)}")
+
+            finally:
+                queue_manager.download_queue.task_done()
+    
+    @pytest.mark.asyncio
+    async def test_retry_mechanism_with_failures(self, queue_manager, mock_telegram_client, temp_workspace):
+        """Test retry mechanism with actual failures and recovery"""
+        temp_dir, data_dir = temp_workspace
+        
+        # Create mock document
+        mock_document = Mock()
+        mock_document.file_name = "failing_download.zip"
+        mock_document.size = 1024 * 1024  # 1MB
+        
+        # Mock client that fails then succeeds
+        failure_count = 0
+        async def failing_download(document, file, progress_callback=None):
+            nonlocal failure_count
+            failure_count += 1
             
-            # Create actual file with realistic content
-            content_size = getattr(document, 'size', 1024 * 1024)
-            content = b'Mock file content ' * (content_size // 20 + 1)
-            content = content[:content_size]  # Exact size
+            if failure_count <= 2:  # Fail first 2 attempts
+                raise ConnectionError(f"Network error (attempt {failure_count})")
             
+            # Success on 3rd attempt
+            content = b'Success after retry' * 1000
             with open(file, 'wb') as f:
                 f.write(content)
             return file
         
-        client.download_media = mock_download_media
+        mock_telegram_client.download_media = failing_download
         
-        # Mock upload
-        async def mock_send_file(entity, file, **kwargs):
-            # Simulate upload time
-            if os.path.exists(file):
-                file_size = os.path.getsize(file)
-                progress_callback = kwargs.get('progress_callback')
-                if progress_callback:
-                    for i in range(0, file_size, file_size // 5):
-                        progress_callback(i, file_size)
-                        await asyncio.sleep(0.01)
-                    progress_callback(file_size, file_size)
+        # Track retry attempts
+        retry_attempts = []
+        
+        output_path = os.path.join(data_dir, "retry_test.zip")
+        task = {
+            'document': mock_document,
+            'output_path': output_path,
+            'chat_id': 123456,
+            'client': mock_telegram_client,
+            'attempts': 0,
+            'max_attempts': 5
+        }
+        
+        # Simulate retry loop
+        success = False
+        while task['attempts'] < task['max_attempts'] and not success:
+            task['attempts'] += 1
+            retry_attempts.append(task['attempts'])
             
-            mock_message = Mock()
-            mock_message.id = 12345
-            return mock_message
+            try:
+                # Ensure output directory exists
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                
+                result = await mock_telegram_client.download_media(
+                    task['document'],
+                    task['output_path']
+                )
+                
+                if os.path.exists(output_path):
+                    success = True
+                    print(f"✅ Download succeeded on attempt {task['attempts']}")
+                    break
+                    
+            except Exception as e:
+                print(f"❌ Attempt {task['attempts']} failed: {e}")
+                if task['attempts'] < task['max_attempts']:
+                    await asyncio.sleep(0.1)  # Short retry delay for testing
         
-        client.send_file = mock_send_file
+        # Verify retry mechanism worked
+        assert success, "Download should eventually succeed"
+        assert task['attempts'] == 3, "Should succeed on 3rd attempt"
+        assert len(retry_attempts) == 3, "Should have 3 retry attempts"
+        assert os.path.exists(output_path), "File should exist after successful retry"
         
-        return client
+        print(f"🔄 Retry attempts: {retry_attempts}")
+        print(f"📁 Final file size: {os.path.getsize(output_path)} bytes")
     
     @pytest.mark.asyncio
-    async def test_full_download_queue_workflow(self, temp_workspace, mock_telegram_client):
-        """Test complete download queue processing workflow"""
-        temp_dir, data_dir = temp_workspace
-        
-        # Patch file paths to use temp directory
-        with patch('utils.constants.DATA_DIR', data_dir):
-            with patch('utils.constants.DOWNLOAD_QUEUE_FILE', os.path.join(data_dir, 'download_queue.json')):
-                with patch('utils.constants.UPLOAD_QUEUE_FILE', os.path.join(data_dir, 'upload_queue.json')):
-                    
-                    # Create queue manager
-                    queue_manager = QueueManager()
-                    
-                    # Create mock document
-                    mock_document = Mock()
-                    mock_document.file_name = "test_video.mp4"
-                    mock_document.size = 2 * 1024 * 1024  # 2MB
-                    mock_document.mime_type = "video/mp4"
-                    
-                    # Track progress
-                    progress_updates = []
-                    def track_progress(current, total):
-                        progress_updates.append((current, total))
-                    
-                    # Add download task
-                    output_path = os.path.join(data_dir, "downloaded_video.mp4")
-                    task_data = {
-                        'document': mock_document,
-                        'output_path': output_path,
-                        'chat_id': 123456,
-                        'progress_callback': track_progress,
-                        'client': mock_telegram_client
-                    }
-                    
-                    await queue_manager.add_download_task(task_data)
-                    
-                    # Process queue (simulate one iteration)
-                    task = await queue_manager.download_queue.get()
-                    
-                    # Execute download task manually
-                    try:
-                        client = task['client']
-                        document = task['document']
-                        output_path = task['output_path']
-                        progress_callback = task.get('progress_callback')
-                        
-                        # Ensure output directory exists
-                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                        
-                        # Download file
-                        result = await client.download_media(
-                            document, 
-                            output_path,
-                            progress_callback=progress_callback
-                        )
-                        
-                        # Verify file was created
-                        assert os.path.exists(output_path)
-                        assert os.path.getsize(output_path) == mock_document.size
-                        
-                        # Verify progress was tracked
-                        assert len(progress_updates) > 0
-                        assert progress_updates[-1] == (mock_document.size, mock_document.size)
-                        
-                        print(f"✅ Download completed: {output_path}")
-                        print(f"📊 Progress updates: {len(progress_updates)}")
-                        
-                    finally:
-                        queue_manager.download_queue.task_done()
-    
-    @pytest.mark.asyncio
-    async def test_retry_mechanism_with_failures(self, temp_workspace, mock_telegram_client):
-        """Test retry mechanism with actual failures and recovery"""
-        temp_dir, data_dir = temp_workspace
-        
-        with patch('utils.constants.DATA_DIR', data_dir):
-            queue_manager = QueueManager()
-            
-            # Create mock document
-            mock_document = Mock()
-            mock_document.file_name = "failing_download.zip"
-            mock_document.size = 1024 * 1024  # 1MB
-            
-            # Mock client that fails then succeeds
-            failure_count = 0
-            async def failing_download(document, file, progress_callback=None):
-                nonlocal failure_count
-                failure_count += 1
-                
-                if failure_count <= 2:  # Fail first 2 attempts
-                    raise ConnectionError(f"Network error (attempt {failure_count})")
-                
-                # Success on 3rd attempt
-                content = b'Success after retry' * 1000
-                with open(file, 'wb') as f:
-                    f.write(content)
-                return file
-            
-            mock_telegram_client.download_media = failing_download
-            
-            # Track retry attempts
-            retry_attempts = []
-            
-            output_path = os.path.join(data_dir, "retry_test.zip")
-            task = {
-                'document': mock_document,
-                'output_path': output_path,
-                'chat_id': 123456,
-                'client': mock_telegram_client,
-                'attempts': 0,
-                'max_attempts': 5
-            }
-            
-            # Simulate retry loop
-            success = False
-            while task['attempts'] < task['max_attempts'] and not success:
-                task['attempts'] += 1
-                retry_attempts.append(task['attempts'])
-                
-                try:
-                    # Ensure output directory exists
-                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                    
-                    result = await mock_telegram_client.download_media(
-                        task['document'],
-                        task['output_path']
-                    )
-                    
-                    if os.path.exists(output_path):
-                        success = True
-                        print(f"✅ Download succeeded on attempt {task['attempts']}")
-                        break
-                        
-                except Exception as e:
-                    print(f"❌ Attempt {task['attempts']} failed: {e}")
-                    if task['attempts'] < task['max_attempts']:
-                        await asyncio.sleep(0.1)  # Short retry delay for testing
-            
-            # Verify retry mechanism worked
-            assert success, "Download should eventually succeed"
-            assert task['attempts'] == 3, "Should succeed on 3rd attempt"
-            assert len(retry_attempts) == 3, "Should have 3 retry attempts"
-            assert os.path.exists(output_path), "File should exist after successful retry"
-            
-            print(f"🔄 Retry attempts: {retry_attempts}")
-            print(f"📁 Final file size: {os.path.getsize(output_path)} bytes")
-    
-    @pytest.mark.asyncio
-    async def test_concurrent_queue_processing(self, temp_workspace, mock_telegram_client):
+    async def test_concurrent_queue_processing(self, queue_manager, mock_telegram_client, temp_workspace):
         """Test concurrent processing with semaphore limits"""
         temp_dir, data_dir = temp_workspace
         
-        with patch('utils.constants.DATA_DIR', data_dir):
-            queue_manager = QueueManager()
+        # Create multiple mock documents
+        documents = []
+        for i in range(5):
+            doc = Mock()
+            doc.file_name = f"concurrent_test_{i}.mp4"
+            doc.size = 512 * 1024  # 512KB each
+            doc.mime_type = "video/mp4"
+            documents.append(doc)
+        
+        # Track concurrent executions
+        active_downloads = []
+        max_concurrent = 0
+        
+        async def tracked_download(document, file, progress_callback=None):
+            nonlocal max_concurrent
+            active_downloads.append(document.file_name)
+            max_concurrent = max(max_concurrent, len(active_downloads))
             
-            # Create multiple mock documents
-            documents = []
-            for i in range(5):
-                doc = Mock()
-                doc.file_name = f"concurrent_test_{i}.mp4"
-                doc.size = 512 * 1024  # 512KB each
-                doc.mime_type = "video/mp4"
-                documents.append(doc)
+            # Simulate download time
+            await asyncio.sleep(0.1)
             
-            # Track concurrent executions
-            active_downloads = []
-            max_concurrent = 0
+            # Create file
+            content = f"Content for {document.file_name}".encode() * 1000
+            with open(file, 'wb') as f:
+                f.write(content)
             
-            async def tracked_download(document, file, progress_callback=None):
-                nonlocal max_concurrent
-                active_downloads.append(document.file_name)
-                max_concurrent = max(max_concurrent, len(active_downloads))
-                
-                # Simulate download time
-                await asyncio.sleep(0.1)
-                
-                # Create file
-                content = f"Content for {document.file_name}".encode() * 1000
-                with open(file, 'wb') as f:
-                    f.write(content)
-                
-                active_downloads.remove(document.file_name)
-                return file
-            
-            mock_telegram_client.download_media = tracked_download
-            
-            # Add multiple download tasks
-            tasks = []
-            for i, doc in enumerate(documents):
-                output_path = os.path.join(data_dir, f"concurrent_{i}.mp4")
-                task_data = {
-                    'document': doc,
-                    'output_path': output_path,
-                    'client': mock_telegram_client
-                }
-                tasks.append(queue_manager.add_download_task(task_data))
-            
-            # Add all tasks
-            await asyncio.gather(*tasks)
-            
-            # Process tasks concurrently (simulating semaphore behavior)
-            download_tasks = []
-            semaphore = asyncio.Semaphore(DOWNLOAD_SEMAPHORE_LIMIT)
-            
-            async def process_one_download():
-                async with semaphore:
-                    if not queue_manager.download_queue.empty():
-                        task = await queue_manager.download_queue.get()
-                        try:
-                            os.makedirs(os.path.dirname(task['output_path']), exist_ok=True)
-                            await mock_telegram_client.download_media(
-                                task['document'],
-                                task['output_path']
-                            )
-                        finally:
-                            queue_manager.download_queue.task_done()
-            
-            # Start concurrent downloads
-            for i in range(len(documents)):
-                download_tasks.append(process_one_download())
-            
-            # Wait for all downloads to complete
-            await asyncio.gather(*download_tasks)
-            
-            # Verify concurrency was limited
-            assert max_concurrent <= DOWNLOAD_SEMAPHORE_LIMIT, f"Max concurrent downloads ({max_concurrent}) exceeded limit ({DOWNLOAD_SEMAPHORE_LIMIT})"
-            
-            # Verify all files were created
-            for i in range(len(documents)):
-                output_path = os.path.join(data_dir, f"concurrent_{i}.mp4")
-                assert os.path.exists(output_path), f"File {output_path} should exist"
-            
-            print(f"📊 Max concurrent downloads: {max_concurrent}")
-            print(f"🚀 Semaphore limit respected: {max_concurrent <= DOWNLOAD_SEMAPHORE_LIMIT}")
+            active_downloads.remove(document.file_name)
+            return file
+        
+        mock_telegram_client.download_media = tracked_download
+        
+        # Add multiple download tasks
+        tasks = []
+        for i, doc in enumerate(documents):
+            output_path = os.path.join(data_dir, f"concurrent_{i}.mp4")
+            task_data = {
+                'document': doc,
+                'output_path': output_path,
+                'client': mock_telegram_client
+            }
+            tasks.append(queue_manager.add_download_task(task_data))
+        
+        # Add all tasks
+        await asyncio.gather(*tasks)
+        
+        # Process tasks concurrently (simulating semaphore behavior)
+        download_tasks = []
+        semaphore = asyncio.Semaphore(DOWNLOAD_SEMAPHORE_LIMIT)
+        
+        async def process_one_download():
+            async with semaphore:
+                if not queue_manager.download_queue.empty():
+                    task = await queue_manager.download_queue.get()
+                    try:
+                        os.makedirs(os.path.dirname(task['output_path']), exist_ok=True)
+                        await mock_telegram_client.download_media(
+                            task['document'],
+                            task['output_path']
+                        )
+                    finally:
+                        queue_manager.download_queue.task_done()
+        
+        # Start concurrent downloads
+        for i in range(len(documents)):
+            download_tasks.append(process_one_download())
+        
+        # Wait for all downloads to complete
+        await asyncio.gather(*download_tasks)
+        
+        # Verify concurrency was limited
+        assert max_concurrent <= DOWNLOAD_SEMAPHORE_LIMIT, f"Max concurrent downloads ({max_concurrent}) exceeded limit ({DOWNLOAD_SEMAPHORE_LIMIT})"
+        
+        # Verify all files were created
+        for i in range(len(documents)):
+            output_path = os.path.join(data_dir, f"concurrent_{i}.mp4")
+            assert os.path.exists(output_path), f"File {output_path} should exist"
+        
+        print(f"📊 Max concurrent downloads: {max_concurrent}")
+        print(f"🚀 Semaphore limit respected: {max_concurrent <= DOWNLOAD_SEMAPHORE_LIMIT}")
 
 class TestErrorScenarios:
     """Test realistic error scenarios and recovery"""

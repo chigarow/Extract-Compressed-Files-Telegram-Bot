@@ -106,7 +106,7 @@ except ImportError as e:
     QueueManager = MockQueueManager
 
 
-class TestVideoUploadErrorHandling(unittest.TestCase):
+class TestVideoUploadErrorHandling(unittest.IsolatedAsyncioTestCase):
     """Test video upload error handling and fallback mechanisms."""
     
     def setUp(self):
@@ -149,49 +149,51 @@ class TestVideoUploadErrorHandling(unittest.TestCase):
                 result = self.queue_manager._is_invalid_media_error(error_msg)
                 self.assertFalse(result, f"Should not detect as invalid media error: {error_msg}")
     
-    def test_video_file_validation_with_real_files(self):
+    async def test_video_file_validation_with_real_files(self):
         """Test video file validation with temporary files."""
-        # Test with a file that's too small
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as small_file:
-            small_file.write(b'small')  # Only 5 bytes
-            small_file_path = small_file.name
+        # Mock is_ffprobe_available to ensure we test fallback logic and avoid ffprobe on random data
+        with unittest.mock.patch('utils.media_processing.is_ffprobe_available', return_value=False):
+            # Test with a file that's too small
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as small_file:
+                small_file.write(b'small')  # Only 5 bytes
+                small_file_path = small_file.name
             
-        try:
-            result = self.queue_manager._validate_video_file(small_file_path)
-            self.assertFalse(result, "Small files should be invalid")
-        finally:
-            os.unlink(small_file_path)
+            try:
+                result = await self.queue_manager._validate_video_file(small_file_path)
+                self.assertFalse(result, "Small files should be invalid")
+            finally:
+                os.unlink(small_file_path)
             
-        # Test with a larger file that has MP4 signature
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as large_file:
-            # Write MP4 signature + padding to reach 1MB+
-            mp4_header = b'\x00\x00\x00\x18ftypmp4'
-            padding = b'\x00' * (1024 * 1024)  # 1MB of padding
-            large_file.write(mp4_header + padding)
-            large_file_path = large_file.name
+            # Test with a larger file that has MP4 signature
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as large_file:
+                # Write MP4 signature + padding to reach 1MB+
+                mp4_header = b'\x00\x00\x00\x18ftypmp4'
+                padding = b'\x00' * (1024 * 1024)  # 1MB of padding
+                large_file.write(mp4_header + padding)
+                large_file_path = large_file.name
             
-        try:
-            result = self.queue_manager._validate_video_file(large_file_path)
-            self.assertTrue(result, "Large files with valid signature should be valid")
-        finally:
-            os.unlink(large_file_path)
+            try:
+                result = await self.queue_manager._validate_video_file(large_file_path)
+                self.assertTrue(result, "Large files with valid signature should be valid")
+            finally:
+                os.unlink(large_file_path)
             
-        # Test with non-existent file
-        result = self.queue_manager._validate_video_file('/nonexistent/file.mp4')
-        self.assertFalse(result, "Non-existent files should be invalid")
-        
-        # Test with non-video extension
-        with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as text_file:
-            text_file.write(b'x' * (1024 * 1024))  # 1MB
-            text_file_path = text_file.name
+            # Test with non-existent file
+            result = await self.queue_manager._validate_video_file('/nonexistent/file.mp4')
+            self.assertFalse(result, "Non-existent files should be invalid")
             
-        try:
-            result = self.queue_manager._validate_video_file(text_file_path)
-            self.assertFalse(result, "Non-video files should be invalid")
-        finally:
-            os.unlink(text_file_path)
+            # Test with non-video extension
+            with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as text_file:
+                text_file.write(b'x' * (1024 * 1024))  # 1MB
+                text_file_path = text_file.name
+            
+            try:
+                result = await self.queue_manager._validate_video_file(text_file_path)
+                self.assertFalse(result, "Non-video files should be invalid")
+            finally:
+                os.unlink(text_file_path)
     
-    def test_video_file_signature_detection(self):
+    async def test_video_file_signature_detection(self):
         """Test video file signature detection."""
         # Test different video signatures
         signatures_and_extensions = [
@@ -209,7 +211,7 @@ class TestVideoUploadErrorHandling(unittest.TestCase):
                 video_file_path = video_file.name
                 
             try:
-                result = self.queue_manager._validate_video_file(video_file_path)
+                result = await self.queue_manager._validate_video_file(video_file_path)
                 self.assertTrue(result, f"Should validate {extension} with correct signature")
             finally:
                 os.unlink(video_file_path)

@@ -1,0 +1,122 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.9, pytest-8.4.2, pluggy-1.6.0
+rootdir: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles
+configfile: pytest.ini
+plugins: asyncio-1.2.0, anyio-4.11.0, cov-7.0.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collected 6 items
+
+tests/test_video_upload_error_handling.py DEBUG: QueueManager class: <class 'utils.queue_manager.QueueManager'>
+DEBUG: QueueManager file: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/utils/queue_manager.py
+.DEBUG: QueueManager class: <class 'utils.queue_manager.QueueManager'>
+DEBUG: QueueManager file: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/utils/queue_manager.py
+.DEBUG: QueueManager class: <class 'utils.queue_manager.QueueManager'>
+DEBUG: QueueManager file: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/utils/queue_manager.py
+FDEBUG: QueueManager class: <class 'utils.queue_manager.QueueManager'>
+DEBUG: QueueManager file: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/utils/queue_manager.py
+.DEBUG: QueueManager class: <class 'utils.queue_manager.QueueManager'>
+DEBUG: QueueManager file: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/utils/queue_manager.py
+DEBUG: File exists: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmpyr1dhdtg.mp4
+DEBUG: Extension supported: .mp4
+DEBUG: File exists: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmpriy7cwpi.mp4
+DEBUG: Extension supported: .mp4
+DEBUG: File exists: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmpvmi9hgcg.avi
+DEBUG: Extension supported: .avi
+DEBUG: File exists: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmp5sjxvgnr.mkv
+DEBUG: Extension supported: .mkv
+.DEBUG: QueueManager class: <class 'utils.queue_manager.QueueManager'>
+DEBUG: QueueManager file: /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/utils/queue_manager.py
+DEBUG: File exists: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmps3k8w9k7.mp4
+DEBUG: File exists: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmp7qn0_4aq.mp4
+DEBUG: Extension supported: .mp4
+DEBUG: File does not exist: /nonexistent/file.mp4
+DEBUG: File exists: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmp538hen63.txt
+DEBUG: ffprobe validated file: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmp538hen63.txt
+F
+
+=================================== FAILURES ===================================
+_______ TestVideoUploadErrorHandling.test_invalid_media_error_detection ________
+
+self = <tests.test_video_upload_error_handling.TestVideoUploadErrorHandling testMethod=test_invalid_media_error_detection>
+
+    def test_invalid_media_error_detection(self):
+        """Test detection of invalid media errors."""
+        # Test cases that should be detected as invalid media errors
+        invalid_cases = [
+            "SendMultiMediaRequest: Invalid media object provided",
+            "Error uploading grouped media: invalid_file corrupted",
+            "Media_invalid: file format unsupported format",
+            "Bad_request: invalid_argument in media group",
+            "Grouped media upload failed: invalid media object",
+            "Album upload error: corrupted file_reference_expired"
+        ]
+    
+        for error_msg in invalid_cases:
+            with self.subTest(error_msg=error_msg):
+                result = self.queue_manager._is_invalid_media_error(error_msg)
+>               self.assertTrue(result, f"Should detect invalid media error: {error_msg}")
+E               AssertionError: False is not true : Should detect invalid media error: Grouped media upload failed: invalid media object
+
+tests/test_video_upload_error_handling.py:136: AssertionError
+___ TestVideoUploadErrorHandling.test_video_file_validation_with_real_files ____
+
+self = <tests.test_video_upload_error_handling.TestVideoUploadErrorHandling testMethod=test_video_file_validation_with_real_files>
+
+    async def test_video_file_validation_with_real_files(self):
+        """Test video file validation with temporary files."""
+        # Test with a file that's too small
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as small_file:
+            small_file.write(b'small')  # Only 5 bytes
+            small_file_path = small_file.name
+    
+        try:
+            result = await self.queue_manager._validate_video_file(small_file_path)
+            self.assertFalse(result, "Small files should be invalid")
+        finally:
+            os.unlink(small_file_path)
+    
+        # Test with a larger file that has MP4 signature
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as large_file:
+            # Write MP4 signature + padding to reach 1MB+
+            mp4_header = b'\x00\x00\x00\x18ftypmp4'
+            padding = b'\x00' * (1024 * 1024)  # 1MB of padding
+            large_file.write(mp4_header + padding)
+            large_file_path = large_file.name
+    
+        try:
+            result = await self.queue_manager._validate_video_file(large_file_path)
+            self.assertTrue(result, "Large files with valid signature should be valid")
+        finally:
+            os.unlink(large_file_path)
+    
+        # Test with non-existent file
+        result = await self.queue_manager._validate_video_file('/nonexistent/file.mp4')
+        self.assertFalse(result, "Non-existent files should be invalid")
+    
+        # Test with non-video extension
+        with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as text_file:
+            text_file.write(b'x' * (1024 * 1024))  # 1MB
+            text_file_path = text_file.name
+    
+        try:
+            result = await self.queue_manager._validate_video_file(text_file_path)
+>           self.assertFalse(result, "Non-video files should be invalid")
+E           AssertionError: True is not false : Non-video files should be invalid
+
+tests/test_video_upload_error_handling.py:195: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    extractor:queue_manager.py:2502 Video file too small: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmps3k8w9k7.mp4 (5 bytes)
+WARNING  extractor:queue_manager.py:2556 ffprobe failed for /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmp7qn0_4aq.mp4: 
+ERROR    extractor:queue_manager.py:2495 Video file does not exist: /nonexistent/file.mp4
+WARNING  extractor:queue_manager.py:2525 Video file has unknown signature: /var/folders/nc/6xpj5hk90ngbdtsb87s0z2m80000gn/T/tmp538hen63.txt - 78787878787878787878787878787878
+WARNING  asyncio:base_events.py:2045 Executing <Task finished name='Task-23' coro=<TestVideoUploadErrorHandling.test_video_file_validation_with_real_files() done, defined at /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/tests/test_video_upload_error_handling.py:157> exception=AssertionError('True is not false : Non-video files should be invalid') created at /opt/homebrew/Cellar/python@3.13/3.13.9_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py:100> took 0.190 seconds
+=============================== warnings summary ===============================
+venv/lib/python3.13/site-packages/telethon/helpers.py:432
+  /Users/gradito.tunggulcahyo/Documents/Script/ExtractCompressedFiles/venv/lib/python3.13/site-packages/telethon/helpers.py:432: DeprecationWarning: There is no current event loop
+    return asyncio.get_event_loop_policy().get_event_loop()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_video_upload_error_handling.py::TestVideoUploadErrorHandling::test_invalid_media_error_detection
+FAILED tests/test_video_upload_error_handling.py::TestVideoUploadErrorHandling::test_video_file_validation_with_real_files
+==================== 2 failed, 4 passed, 1 warning in 1.39s ====================

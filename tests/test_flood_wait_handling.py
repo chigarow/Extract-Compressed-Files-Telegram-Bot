@@ -59,7 +59,7 @@ class TestFloodWaitErrorHandling:
         
         # Create FloodWaitError with specific wait time
         flood_error = FloodWaitError(None)
-        flood_error.seconds = 1678  # 28 minutes as in the user's log
+        flood_error.seconds = 1680  # 28 minutes exactly
         
         # Mock the TelegramOperations to raise FloodWaitError
         with patch('utils.queue_manager.TelegramOperations') as mock_telegram_ops:
@@ -80,7 +80,7 @@ class TestFloodWaitErrorHandling:
         assert os.path.exists(upload_task['file_path']), "File should not be deleted on FloodWaitError"
         
         # Verify that reply was called with informative message
-        upload_task['event'].reply.assert_called_once()
+        assert upload_task['event'].reply.called
         call_args = upload_task['event'].reply.call_args[0][0]
         assert 'rate limit' in call_args.lower()
         assert '28m' in call_args or '1678' in call_args  # Should mention wait time

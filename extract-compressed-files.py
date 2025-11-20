@@ -22,6 +22,7 @@ import asyncio
 import time
 import sys
 import json
+import atexit
 from datetime import datetime
 from telethon import events
 from telethon.errors import FloodWaitError, FileReferenceExpiredError
@@ -30,6 +31,10 @@ from telethon.errors import FloodWaitError, FileReferenceExpiredError
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
+
+# Singleton lock path
+LOCK_FILE = os.path.join(script_dir, "script.lock")
+
 
 # Import utility modules
 from utils import (
@@ -75,6 +80,7 @@ from utils import (
     handle_cancel_extraction, handle_cancel_process, handle_cleanup_command, 
     handle_confirm_cleanup_command, handle_cleanup_orphans_command
 )
+from utils.singleton_lock import create_lock_file, remove_lock_file
 
 # Bot start time
 start_time = datetime.now()
@@ -815,10 +821,15 @@ async def main_async():
 
 def main():
     """Main entry point."""
+    # Ensure only one instance runs at a time
+    create_lock_file(LOCK_FILE, logger)
+    atexit.register(lambda: remove_lock_file(LOCK_FILE, logger))
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
         logger.info('Bot stopped by user')
+    finally:
+        remove_lock_file(LOCK_FILE, logger)
 
 
 if __name__ == '__main__':

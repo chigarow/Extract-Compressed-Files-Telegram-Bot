@@ -6,8 +6,10 @@ Contains functions for Telegram client operations, uploads, downloads, and messa
 import os
 import time
 import asyncio
+import sqlite3
 import logging
 from telethon import TelegramClient
+from telethon.sessions import SQLiteSession
 from telethon.errors import RPCError, FloodWaitError, FileReferenceExpiredError
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeFilename
 from .constants import (
@@ -27,13 +29,32 @@ logger = logging.getLogger('extractor')
 
 # Global client instance
 client = None
+SESSION_DB_TIMEOUT = 15
+
+
+class TimeoutSQLiteSession(SQLiteSession):
+    """SQLiteSession variant with configurable connection timeout."""
+    
+    def __init__(self, session_id=None, timeout=SESSION_DB_TIMEOUT):
+        self._timeout = timeout
+        super().__init__(session_id=session_id)
+    
+    def _cursor(self):
+        if self._conn is None:
+            self._conn = sqlite3.connect(
+                self.filename,
+                check_same_thread=False,
+                timeout=self._timeout
+            )
+        return self._conn.cursor()
 
 
 def get_client() -> TelegramClient:
     """Get or create the global Telethon client."""
     global client
     if client is None:
-        client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+        session = TimeoutSQLiteSession(SESSION_PATH, timeout=SESSION_DB_TIMEOUT)
+        client = TelegramClient(session, API_ID, API_HASH)
     return client
 
 
@@ -447,4 +468,3 @@ def _add_compatibility_methods():
     TelegramOperations.ensure_connected = ensure_connected
 
 _add_compatibility_methods()
-

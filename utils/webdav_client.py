@@ -120,7 +120,7 @@ class TorboxWebDAVClient:
         password: str,
         *,
         timeout: int = 120,
-        chunk_size: int = 512 * 1024,
+        chunk_size: Optional[int] = None,
     ):
         if not username or not password:
             raise ValueError('WebDAV credentials are required')
@@ -129,6 +129,10 @@ class TorboxWebDAVClient:
         self.username = username
         self.password = password
         self.timeout = timeout
+        # Use provided chunk_size or default from config (converted to bytes)
+        if chunk_size is None:
+            from utils.constants import WEBDAV_CHUNK_SIZE_KB
+            chunk_size = WEBDAV_CHUNK_SIZE_KB * 1024
         self.chunk_size = chunk_size
 
         self._sync_client = SyncWebDAVClient(

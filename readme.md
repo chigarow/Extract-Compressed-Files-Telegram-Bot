@@ -146,6 +146,7 @@ The script includes intelligent fallback mechanisms and will work with just Pyth
 
         # Optional configuration parameters:
         # WEBDAV_SEQUENTIAL_MODE=true    # Force WebDAV download→upload→cleanup one file at a time (recommended for Termux/low-RAM)
+        # WEBDAV_CHUNK_SIZE_KB=1024      # WebDAV download chunk size in KB (default: 1024, lower for low-memory devices)
         # MAX_ARCHIVE_GB=6.0
         # DISK_SPACE_FACTOR=2.5
         # MAX_CONCURRENT=1
@@ -205,6 +206,62 @@ In addition to processing compressed archives, you can now send images and video
     -   Delete the local file after upload.
 
 This feature is particularly useful when you want to optimize media files for Telegram or re-upload them to another account while ensuring they appear properly in the Media tab.
+
+### WebDAV Chunking for Memory Optimization ✨ **NEW**
+
+The bot now supports **configurable chunking for WebDAV downloads** to reduce memory usage on resource-constrained devices like Termux on Android:
+
+**Memory-Friendly Downloads:**
+- **Configurable Chunk Size**: Set `WEBDAV_CHUNK_SIZE_KB` in `secrets.properties` to control memory usage
+- **Default: 1024 KB (1 MB)**: Balances performance and memory efficiency
+- **Low-Memory Devices**: Use 128-512 KB for devices with limited RAM (e.g., Termux on Android)
+- **High-Memory Devices**: Use 2048-4096 KB for faster downloads on powerful systems
+- **Automatic Resume**: Downloads automatically resume from interruption points using HTTP Range requests
+
+**How It Works:**
+Instead of loading entire files into memory, the WebDAV client downloads files in configurable chunks:
+
+```
+Large File (5 GB)
+    ↓
+Download in 1 MB chunks
+    ├── Chunk 1 (1 MB) → Write to disk → Free memory
+    ├── Chunk 2 (1 MB) → Write to disk → Free memory
+    ├── Chunk 3 (1 MB) → Write to disk → Free memory
+    └── ... (5000 chunks total)
+Result: Maximum memory usage = 1 MB (instead of 5 GB)
+```
+
+**Configuration Examples:**
+
+For **Termux/Android** (low RAM):
+```ini
+WEBDAV_CHUNK_SIZE_KB=256    # 256 KB chunks for minimal memory usage
+WEBDAV_SEQUENTIAL_MODE=true  # Process one file at a time
+```
+
+For **Desktop/Server** (high RAM):
+```ini
+WEBDAV_CHUNK_SIZE_KB=4096   # 4 MB chunks for maximum speed
+```
+
+**Benefits:**
+- ✅ **Prevents Out-of-Memory Crashes**: Especially on Android Termux with limited RAM
+- ✅ **Works with Sequential Mode**: Complements `WEBDAV_SEQUENTIAL_MODE` for maximum memory efficiency
+- ✅ **Automatic Resume Support**: Interrupted downloads resume from last successful chunk
+- ✅ **No Configuration Required**: Works with sensible defaults (1024 KB)
+- ✅ **Flexible**: Adjust chunk size based on your device's capabilities
+
+**Example:**
+```
+User: Sends WebDAV link for 5 GB file
+Bot: "🔗 Detected WebDAV link!"
+Bot: "⬇️ Downloading large_file.zip (5.00 GB)..."
+Bot: "📊 Using 1 MB chunks for memory efficiency"
+[Download progresses in 1 MB chunks]
+Bot: "✅ Downloaded large_file.zip"
+[Memory usage never exceeds 1 MB for download buffer]
+```
 
 ### Torbox CDN Downloads
 
@@ -935,6 +992,7 @@ The following options can be added to `secrets.properties` to customize behavior
 - `COMPRESSION_TIMEOUT_SECONDS` - Video compression timeout in seconds (default: 300)
 - `WIFI_ONLY_MODE` - Enable WiFi-only downloads for data conservation (default: false)
 - `PARALLEL_DOWNLOADS` - Number of parallel downloads for faster speed (default: 4)
+- `WEBDAV_CHUNK_SIZE_KB` - WebDAV download chunk size in KB for memory optimization (default: 1024) ✨ **NEW**
 
 ## Code Architecture
 

@@ -56,6 +56,8 @@ class Config:
         self.webdav_password = self._get('WEBDAV_PASSWORD', '')
         self.webdav_base_url = self._get('WEBDAV_BASE_URL', 'https://webdav.torbox.app')
         self.webdav_enabled = self._getboolean('WEBDAV_ENABLED', True)
+        # WebDAV chunk size for downloads/uploads (KB) - reduces memory usage on low-resource devices
+        self.webdav_chunk_size_kb = self._getint('WEBDAV_CHUNK_SIZE_KB', 1024)
 
     def _get(self, key, fallback=None):
         return self._config.get('DEFAULT', key, fallback=fallback)

@@ -145,6 +145,7 @@ The script includes intelligent fallback mechanisms and will work with just Pyth
         WEBDAV_ENABLED=true
 
         # Optional configuration parameters:
+        # WEBDAV_SEQUENTIAL_MODE=true    # Force WebDAV download→upload→cleanup one file at a time (recommended for Termux/low-RAM)
         # MAX_ARCHIVE_GB=6.0
         # DISK_SPACE_FACTOR=2.5
         # MAX_CONCURRENT=1
@@ -168,6 +169,12 @@ The script includes intelligent fallback mechanisms and will work with just Pyth
 
     ```bash
     python extract-compressed-files.py
+    ```
+
+    On Termux, you can also use `termux_autostart.sh` with the Termux:Boot addon or cron to automatically relaunch the bot after crashes or device reboots:
+
+    ```bash
+    bash termux_autostart.sh
     ```
 
     On first run, you'll be prompted to enter your phone number and the code sent by Telegram.

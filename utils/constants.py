@@ -75,10 +75,19 @@ STREAMING_LOW_SPACE_CHECK_INTERVAL = int(os.environ.get('STREAMING_LOW_SPACE_CHE
 MIN_PCT_STEP = 5
 MIN_EDIT_INTERVAL = 7  # seconds
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse an environment flag with sane defaults."""
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ('1', 'true', 'yes', 'on')
+
 # Queue concurrency limits - Set to 1 for fully sequential processing
 # This prevents parallel processing and reduces memory usage on low-resource devices
 DOWNLOAD_SEMAPHORE_LIMIT = 1  # Process only 1 download at a time
 UPLOAD_SEMAPHORE_LIMIT = 1    # Process only 1 upload at a time
+# WebDAV sequential mode enforces download -> upload -> cleanup order (memory friendly for Termux)
+WEBDAV_SEQUENTIAL_MODE = _env_bool('WEBDAV_SEQUENTIAL_MODE', True)
 
 # Retry mechanism settings
 MAX_RETRY_ATTEMPTS = 5        # Maximum retry attempts per operation

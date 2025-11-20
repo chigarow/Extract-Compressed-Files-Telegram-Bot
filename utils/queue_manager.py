@@ -15,7 +15,8 @@ from .constants import (
     DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS,
     RETRY_BASE_INTERVAL, STREAMING_EXTRACTION_ENABLED, STREAMING_MIN_FREE_GB,
     STREAMING_LOW_SPACE_CHECK_INTERVAL, STREAMING_MANIFEST_DIR, TORBOX_DIR,
-    WEBDAV_DIR, MEDIA_EXTENSIONS, DATA_DIR, FAILED_UPLOADS_FILE
+    WEBDAV_DIR, MEDIA_EXTENSIONS, DATA_DIR, FAILED_UPLOADS_FILE,
+    WEBDAV_SEQUENTIAL_MODE
 )
 from .file_operations import compute_sha256
 from .cache_manager import PersistentQueue, CacheManager
@@ -255,6 +256,7 @@ class QueueManager:
         self._skip_upload_idle_wait = False  # test hook to bypass idle wait when no workers run
         self.failed_uploads_list = failed_uploads_list  # optional list to collect failed uploads for recovery
         self.failed_uploads_file = FAILED_UPLOADS_FILE if failed_uploads_list is not None else None
+        self.webdav_sequential = WEBDAV_SEQUENTIAL_MODE
         
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
@@ -956,17 +958,29 @@ class QueueManager:
                 if pct % 20 == 0:
                     logger.info(f"WebDAV download progress {filename}: {pct}%")
 
+        resumed_from_disk = False
+        existing_bytes = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+        if existing_bytes > 0:
+            resumed_from_disk = True
+            logger.info(f"♻️ Found existing WebDAV file on disk, resuming upload: {temp_path} ({existing_bytes} bytes)")
+        elif os.path.exists(temp_path) and existing_bytes == 0:
+            # Clean up empty partials before retrying to avoid disk bloat
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
         try:
-            os.makedirs(os.path.dirname(temp_path) or WEBDAV_DIR, exist_ok=True)
-            logger.info(f"📥 Starting WebDAV download: {filename}")
-            await client.download_file(remote_path, temp_path, progress_callback=progress_callback)
-            logger.info(f"✅ WebDAV download completed: {filename}")
-            
-            if status_msg:
-                try:
-                    await status_msg.edit(f'✅ Downloaded {filename} from WebDAV. Queuing upload...')
-                except Exception as edit_error:
-                    logger.debug(f"Failed to edit WebDAV download message: {edit_error}")
+            if not resumed_from_disk:
+                os.makedirs(os.path.dirname(temp_path) or WEBDAV_DIR, exist_ok=True)
+                logger.info(f"📥 Starting WebDAV download: {filename}")
+                await client.download_file(remote_path, temp_path, progress_callback=progress_callback)
+                logger.info(f"✅ WebDAV download completed: {filename}")
+                
+                if status_msg:
+                    try:
+                        await status_msg.edit(f'✅ Downloaded {filename} from WebDAV. Queuing upload...')
+                    except Exception as edit_error:
+                        logger.debug(f"Failed to edit WebDAV download message: {edit_error}")
         except Exception as exc:
             logger.error(f"❌ WebDAV download failed for {filename}: {exc}")
             await self._handle_webdav_download_failure(task, event, exc, live_event)
@@ -992,6 +1006,10 @@ class QueueManager:
         logger.info(f"📤 Queuing upload task for {filename} (type: {upload_task_type})")
         await self.add_upload_task(upload_task)
         logger.info(f"✅ Upload task queued successfully for {filename}")
+        
+        if self.webdav_sequential and not getattr(self, '_disable_upload_worker_start', False):
+            logger.info("⏸️ Sequential WebDAV mode enabled; waiting for upload to finish before next download")
+            await self._wait_for_upload_idle()
 
     async def _handle_webdav_download_failure(self, task: dict, event, error: Exception, live_event: bool):
         """Handle retries for failed WebDAV downloads."""
@@ -2080,7 +2098,16 @@ class QueueManager:
         """Wait until the upload queue and worker are idle."""
         if getattr(self, '_skip_upload_idle_wait', False):
             return
+        if getattr(self, '_disable_upload_worker_start', False):
+            # Tests may disable upload workers; avoid waiting forever
+            return
         while True:
+            # Auto-start upload worker if needed to avoid deadlock in sequential mode
+            if ((self.upload_task is None or self.upload_task.done()) 
+                and not getattr(self, '_disable_upload_worker_start', False) 
+                and not self.upload_queue.empty()):
+                logger.info("Upload worker idle during wait; starting upload processor to drain queue")
+                self.upload_task = asyncio.create_task(self._process_upload_queue())
             queue_empty = self.upload_queue.qsize() == 0
             uploads_in_flight = self.active_uploads == 0
             if queue_empty and uploads_in_flight:

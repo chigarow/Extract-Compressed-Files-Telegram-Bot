@@ -21,7 +21,7 @@ from .file_operations import compute_sha256, extract_with_password, is_password_
 from .media_processing import (
     is_ffmpeg_available, is_ffprobe_available, validate_video_file,
     is_telegram_compatible_video, needs_video_processing,
-    compress_video_for_telegram, get_video_attributes_and_thumbnail
+    compress_video_for_telegram, get_video_attributes_and_thumbnail, convert_video_for_recovery
 )
 from .cache_manager import CacheManager, PersistentQueue, ProcessManager, FailedOperationsManager
 from .queue_manager import QueueManager, ProcessingQueue, get_queue_manager, get_processing_queue
@@ -50,7 +50,7 @@ __all__ = [
     'human_size', 'format_eta', 'setup_logger', 'compute_sha256', 'extract_with_password',
     'is_password_error', 'extract_archive_async', 'is_ffmpeg_available', 'is_ffprobe_available',
     'validate_video_file', 'is_telegram_compatible_video', 'needs_video_processing',
-    'compress_video_for_telegram', 'get_video_attributes_and_thumbnail',
+    'compress_video_for_telegram', 'get_video_attributes_and_thumbnail', 'convert_video_for_recovery',
     'CacheManager', 'PersistentQueue', 'ProcessManager', 'FailedOperationsManager',
     'QueueManager', 'ProcessingQueue', 'get_queue_manager', 'get_processing_queue',
     'TelegramOperations', 'get_client', 'ensure_target_entity', 'create_download_progress_callback',

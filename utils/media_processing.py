@@ -9,7 +9,8 @@ import shutil
 import subprocess
 import asyncio
 import logging
-from .constants import TRANSCODE_ENABLED, COMPRESSION_TIMEOUT_SECONDS
+import hashlib
+from .constants import TRANSCODE_ENABLED, COMPRESSION_TIMEOUT_SECONDS, RECOVERY_DIR
 
 logger = logging.getLogger('extractor')
 
@@ -311,6 +312,81 @@ async def get_video_attributes_and_thumbnail(input_path: str) -> tuple:
     except Exception as e:
         logger.error(f"Error extracting video attributes for {input_path}: {e}")
         return 0, 0, 0, None
+
+
+def convert_video_for_recovery(input_path: str) -> str:
+    """
+    Convert a problematic video into a Telegram-friendly MP4 for recovery uploads.
+    
+    Returns the output path on success, or None on failure.
+    """
+    if not input_path or not os.path.exists(input_path):
+        logger.error(f"Recovery conversion input missing: {input_path}")
+        return None
+    
+    if not is_ffmpeg_available():
+        logger.error("ffmpeg not found for recovery conversion. Please install ffmpeg.")
+        return None
+    
+    # Stable output name based on file hash to allow resumable conversion
+    try:
+        with open(input_path, 'rb') as f:
+            file_hash = hashlib.sha256(f.read(8192)).hexdigest()  # partial hash for speed
+    except Exception:
+        file_hash = os.path.basename(input_path)
+    
+    base_name = os.path.splitext(os.path.basename(input_path))[0]
+    output_name = f"{base_name}_{file_hash[:8]}_recovery.mp4"
+    output_path = os.path.join(RECOVERY_DIR, output_name)
+    
+    # Reuse existing converted file if present
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        logger.info(f"Reusing existing converted file for recovery: {output_path}")
+        return output_path
+    
+    cmd = [
+        'ffmpeg',
+        '-y',
+        '-i', input_path,
+        '-c:v', 'libx264',
+        '-preset', 'medium',
+        '-crf', '23',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-movflags', '+faststart',
+        output_path
+    ]
+    
+    try:
+        logger.info(f"Starting recovery conversion: {input_path} -> {output_path}")
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False
+        )
+        if result.returncode != 0:
+            logger.error(f"ffmpeg recovery conversion failed ({result.returncode}) for {input_path}")
+            logger.debug(result.stderr.decode(errors='ignore'))
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception:
+                    pass
+            return None
+        
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.error(f"ffmpeg reported success but output missing/empty: {output_path}")
+            return None
+        
+        logger.info(f"Recovery conversion completed: {output_path}")
+        return output_path
+    except Exception as e:
+        logger.error(f"Unexpected error during recovery conversion: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+    
+    return None
 
 
 async def compress_image_for_telegram(input_path: str, output_path: str = None, target_size: int = TELEGRAM_PHOTO_SIZE_LIMIT) -> str:

@@ -15,7 +15,7 @@ from .constants import (
     DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS,
     RETRY_BASE_INTERVAL, STREAMING_EXTRACTION_ENABLED, STREAMING_MIN_FREE_GB,
     STREAMING_LOW_SPACE_CHECK_INTERVAL, STREAMING_MANIFEST_DIR, TORBOX_DIR,
-    WEBDAV_DIR, MEDIA_EXTENSIONS, DATA_DIR
+    WEBDAV_DIR, MEDIA_EXTENSIONS, DATA_DIR, FAILED_UPLOADS_FILE
 )
 from .file_operations import compute_sha256
 from .cache_manager import PersistentQueue, CacheManager
@@ -243,7 +243,7 @@ class QueueManager:
     access raw queue lists plus statistics helpers.
     """
     
-    def __init__(self, client=None):
+    def __init__(self, client=None, failed_uploads_list=None):
         # Create backwards-compatible queues
         self.download_queue = BackwardsCompatibleQueue()
         self.upload_queue = BackwardsCompatibleQueue()
@@ -253,6 +253,8 @@ class QueueManager:
         self.active_uploads = 0  # tracks uploads currently executing
         self.processing_archives = set()
         self._skip_upload_idle_wait = False  # test hook to bypass idle wait when no workers run
+        self.failed_uploads_list = failed_uploads_list  # optional list to collect failed uploads for recovery
+        self.failed_uploads_file = FAILED_UPLOADS_FILE if failed_uploads_list is not None else None
         
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
@@ -1243,6 +1245,7 @@ class QueueManager:
         except Exception as e:
             retry_count = task.get('retry_count', 0) + 1
             logger.error(f"Upload failed for {filename} (attempt {retry_count}): {e}")
+            error_message = str(e)
             
             if retry_count < MAX_RETRY_ATTEMPTS:
                 # Schedule retry with exponential backoff
@@ -1267,6 +1270,10 @@ class QueueManager:
                 logger.error(f"Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
                 if event and hasattr(event, 'reply'):
                     await event.reply(f"❌ Upload permanently failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts")
+
+                if self._is_invalid_media_error(error_message):
+                    caption = task.get('caption') or (f"📎 {filename}")
+                    self._record_failed_upload(file_path, task, caption, error_message)
                 
                 # Clean up file after max retries
                 try:
@@ -1440,6 +1447,9 @@ class QueueManager:
                         raise
                     except Exception as individual_error:
                         logger.error(f"❌ Individual upload failed for {os.path.basename(file_path)}: {individual_error}")
+                        if self._is_invalid_media_error(str(individual_error)):
+                            caption = f"📦 From: {source_archive}" if source_archive else filename
+                            self._record_failed_upload(file_path, task, caption, str(individual_error))
                 
                 if individual_success_count > 0:
                     logger.info(f"📊 Fallback complete: {individual_success_count}/{len(validated_files)} files uploaded individually")
@@ -2528,6 +2538,49 @@ class QueueManager:
         matches = sum(1 for indicator in indicators if indicator in error_lower)
         
         return matches >= 2
+
+    def _record_failed_upload(self, file_path: str, task: dict, caption: str, error_message: str):
+        """Append failed upload metadata for later recovery."""
+        if not self.failed_uploads_list or not file_path:
+            return
+        
+        try:
+            from config import config  # Local import to avoid circular dependency at module load
+            chat_id = (
+                task.get('chat_id')
+                or getattr(task.get('event', None), 'chat_id', None)
+                or getattr(config, 'target_username', None)
+                or getattr(config, 'account_b_username', None)
+            )
+        except Exception:
+            chat_id = task.get('chat_id') or getattr(task.get('event', None), 'chat_id', None)
+        
+        original_filename = task.get('filename') or os.path.basename(file_path)
+        
+        entry = {
+            "file_path": file_path,
+            "chat_id": chat_id,
+            "caption": caption,
+            "original_filename": original_filename,
+            "error": error_message,
+            "status": "pending"
+        }
+        
+        self.failed_uploads_list.append(entry)
+        logger.info(f"📥 Added failed upload to recovery list: {os.path.basename(file_path)} (reason: {error_message})")
+        self._persist_failed_uploads()
+
+    def _persist_failed_uploads(self):
+        """Persist failed upload list to disk for crash-resilience."""
+        if not self.failed_uploads_file or self.failed_uploads_list is None:
+            return
+        
+        try:
+            os.makedirs(os.path.dirname(self.failed_uploads_file), exist_ok=True)
+            with open(self.failed_uploads_file, 'w', encoding='utf-8') as f:
+                json.dump(self.failed_uploads_list, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to persist failed uploads list: {e}")
     
     async def _validate_video_file(self, file_path: str) -> bool:
         """Validate video file format and metadata."""
@@ -3230,11 +3283,13 @@ queue_manager = None
 processing_queue = None
 
 
-def get_queue_manager() -> QueueManager:
+def get_queue_manager(failed_uploads_list=None) -> QueueManager:
     """Get or create the global queue manager instance."""
     global queue_manager
     if queue_manager is None:
-        queue_manager = QueueManager()
+        queue_manager = QueueManager(failed_uploads_list=failed_uploads_list)
+    elif failed_uploads_list is not None:
+        queue_manager.failed_uploads_list = failed_uploads_list
     return queue_manager
 
 

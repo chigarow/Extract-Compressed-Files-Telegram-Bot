@@ -561,6 +561,10 @@ class QueueManager:
         logger.info("Starting download queue processor")
         
         while True:
+            task = None
+            filename = 'unknown'
+            remove_from_persistent = False
+            cancelled = False
             try:
                 logger.info(f"Download processor waiting for tasks. Current queue size: {self.download_queue.qsize()}")
                 
@@ -569,35 +573,43 @@ class QueueManager:
                 
                 filename = task.get('filename', 'unknown')
                 logger.info(f"Download processor got task: {filename}")
-                
-                # Remove from persistent storage
-                self.download_persistent.remove_item(task)
-                logger.info(f"Removed {filename} from persistent storage")
-                
+
                 # Process with semaphore
                 logger.info(f"Acquiring download semaphore for {filename}")
                 async with self.download_semaphore:
                     logger.info(f"Executing download task for {filename}")
                     await self._execute_download_task(task)
+                    remove_from_persistent = True
                     logger.info(f"Completed download task for {filename}")
                 
-                self.download_queue.task_done()
-                logger.info(f"Marked download task done for {filename}. Remaining queue size: {self.download_queue.qsize()}")
-                
             except asyncio.CancelledError:
+                cancelled = True
                 logger.info("Download queue processor cancelled")
                 break
             except Exception as e:
                 logger.error(f"Error in download queue processor: {e}")
                 import traceback
                 logger.error(f"Full traceback: {traceback.format_exc()}")
-                continue
+            finally:
+                if task is not None and not cancelled:
+                    if remove_from_persistent:
+                        self.download_persistent.remove_item(task)
+                        logger.info(f"Removed {filename} from persistent storage")
+                    else:
+                        logger.info(f"Retaining {filename} in persistent storage for retry/resume")
+                    
+                    self.download_queue.task_done()
+                    logger.info(f"Marked download task done for {filename}. Remaining queue size: {self.download_queue.qsize()}")
     
     async def _process_upload_queue(self):
         """Process upload queue with concurrency control and robust FloodWait handling."""
         logger.info("Starting upload queue processor")
         
         while True:
+            task = None
+            filename = 'unknown'
+            remove_from_persistent = False
+            cancelled = False
             try:
                 logger.info(f"Upload processor waiting for tasks. Current queue size: {self.upload_queue.qsize()}")
                 
@@ -606,11 +618,7 @@ class QueueManager:
                 
                 filename = task.get('filename', 'unknown')
                 logger.info(f"Upload processor got task: {filename}")
-                
-                # Remove from persistent storage
-                self.upload_persistent.remove_item(task)
-                logger.info(f"Removed {filename} from persistent storage")
-                
+
                 # Process with semaphore
                 logger.info(f"Acquiring upload semaphore for {filename}")
                 async with self.upload_semaphore:
@@ -618,34 +626,36 @@ class QueueManager:
                     try:
                         logger.info(f"Executing upload task for {filename}")
                         await self._execute_upload_task(task)
+                        remove_from_persistent = True
                         logger.info(f"Completed upload task for {filename}")
                     finally:
                         self.active_uploads -= 1
                 
-                self.upload_queue.task_done()
-                logger.info(f"Marked upload task done for {filename}. Remaining queue size: {self.upload_queue.qsize()}")
-                
             except asyncio.CancelledError:
+                cancelled = True
                 logger.info("Upload queue processor cancelled")
                 break
             except FloodWaitError as e:
                 # FloodWaitError escaped from execute_upload_task
                 # This should not happen as it's caught there, but handle it as safety measure
                 wait_seconds = e.seconds if hasattr(e, 'seconds') else 60
-                logger.error(f"Uncaught FloodWaitError in upload queue processor: Telegram requires waiting {wait_seconds} seconds")
-                logger.info("Upload queue processor will continue with next task. Failed task has been queued for retry.")
+                logger.error(f"⏳ Uncaught FloodWaitError in upload queue processor: Telegram requires waiting {wait_seconds} seconds")
+                logger.info("📊 Upload queue processor will continue with next task. Failed task has been queued for retry.")
                 
-                # Mark the current task as done so we can continue
-                self.upload_queue.task_done()
-                continue
             except Exception as e:
-                logger.error(f"Error in upload queue processor: {e}")
+                logger.error(f"❌ Error in upload queue processor: {e}")
                 import traceback
                 logger.error(f"Full traceback: {traceback.format_exc()}")
-                
-                # Mark task as done and continue with next task
-                self.upload_queue.task_done()
-                continue
+            finally:
+                if task is not None and not cancelled:
+                    if remove_from_persistent:
+                        self.upload_persistent.remove_item(task)
+                        logger.info(f"Removed {filename} from persistent storage")
+                    else:
+                        logger.info(f"Retaining {filename} in persistent storage for retry/resume")
+                    
+                    self.upload_queue.task_done()
+                    logger.info(f"Marked upload task done for {filename}. Remaining queue size: {self.upload_queue.qsize()}")
     
     async def _execute_download_task(self, task: dict):
         """Execute a download task with retry mechanism."""
@@ -946,14 +956,17 @@ class QueueManager:
 
         try:
             os.makedirs(os.path.dirname(temp_path) or WEBDAV_DIR, exist_ok=True)
+            logger.info(f"📥 Starting WebDAV download: {filename}")
             await client.download_file(remote_path, temp_path, progress_callback=progress_callback)
+            logger.info(f"✅ WebDAV download completed: {filename}")
+            
             if status_msg:
                 try:
                     await status_msg.edit(f'✅ Downloaded {filename} from WebDAV. Queuing upload...')
                 except Exception as edit_error:
                     logger.debug(f"Failed to edit WebDAV download message: {edit_error}")
         except Exception as exc:
-            logger.error(f"WebDAV download failed for {filename}: {exc}")
+            logger.error(f"❌ WebDAV download failed for {filename}: {exc}")
             await self._handle_webdav_download_failure(task, event, exc, live_event)
             return
 
@@ -974,7 +987,9 @@ class QueueManager:
             'retry_count': 0
         }
 
+        logger.info(f"📤 Queuing upload task for {filename} (type: {upload_task_type})")
         await self.add_upload_task(upload_task)
+        logger.info(f"✅ Upload task queued successfully for {filename}")
 
     async def _handle_webdav_download_failure(self, task: dict, event, error: Exception, live_event: bool):
         """Handle retries for failed WebDAV downloads."""
@@ -1048,6 +1063,12 @@ class QueueManager:
                     logger.warning(f"Failed to reply to event for missing file {filename}: {e}")
             else:
                 logger.info(f"❌ File not found: {filename} (no valid event to reply to)")
+            
+            # Schedule retry so the task isn't lost if the file becomes available later
+            retry_task = task.copy()
+            retry_task['retry_count'] = task.get('retry_count', 0) + 1
+            retry_task['retry_after'] = time.time() + RETRY_BASE_INTERVAL
+            await self._add_to_retry_queue(retry_task)
             return
             
         try:

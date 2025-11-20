@@ -11,6 +11,8 @@ PROJECT_DIR="/data/data/com.termux/files/home/Extract-Compressed-Files-Telegram-
 VENV_BIN_DIR="/data/data/com.termux/files/home/venv/bin"
 # Path to the data directory to be monitored for active processing
 DATA_DIR="$PROJECT_DIR/data"
+# Default git branch to pull when no branch argument is provided
+DEFAULT_BRANCH="main"
 
 # --- Full Paths to Executables ---
 PYTHON_EXEC="$VENV_BIN_DIR/python"
@@ -24,6 +26,24 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# --- Help Function ---
+show_help() {
+    echo "Usage: $(basename "$0") [OPTION]"
+    echo "A script to manage the lifecycle (update, restart, kill) of '$SCRIPT_NAME'."
+    echo ""
+    echo "Options:"
+    echo "  --force       Forcefully restarts the script without waiting for active operations."
+    echo "  --kill        Finds and kills the running script process without restarting it."
+    echo "  -b, --branch BRANCH"
+    echo "               Pull the specified git branch (defaults to 'main')."
+    echo "  --help        Display this help message and exit."
+    echo ""
+    echo "If run with no options, the script performs a graceful restart: it waits for"
+    echo "current operations to finish, pulls the latest code from git, updates Python"
+    echo "dependencies, and then restarts the process."
+}
+
+
 # --- Sanity Checks ---
 # Check if the virtual environment path is correct before doing anything else.
 if ! [ -x "$PIP_EXEC" ]; then
@@ -35,31 +55,53 @@ fi
 
 # --- Argument Parsing ---
 FORCE_RESTART=false
-# New Feature: Handle --force-kill argument to only kill the process
-if [ "$1" == "--force-kill" ]; then
-    echo -e "${RED}--- Force Killing Process: $SCRIPT_NAME ---${NC}"
-    PID=$(pgrep -f "$SCRIPT_NAME")
-    if [ -n "$PID" ]; then
-        echo "Found process with PID: $PID. Terminating immediately..."
-        kill -9 "$PID"
-        sleep 1 # Brief pause to allow the OS to process the kill command
-        if pgrep -f "$SCRIPT_NAME" > /dev/null; then
-            echo -e "${RED}Error: Failed to kill the process. It might be unresponsive.${NC}"
-            exit 1
-        else
-            echo -e "${GREEN}Process successfully terminated.${NC}"
-            exit 0 # Exit the script successfully after killing the process
-        fi
-    else
-        echo -e "${GREEN}No running process found. Nothing to kill.${NC}"
-        exit 0 # Exit successfully as there was nothing to do
-    fi
-fi
+GIT_BRANCH=""
 
-# Handle the --force argument for a forceful restart
-if [ "$1" == "--force" ]; then
-    FORCE_RESTART=true
-fi
+# Handle command-line arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help)
+            show_help
+            exit 0
+            ;;
+        --kill)
+            echo -e "${RED}--- Killing Process: $SCRIPT_NAME ---${NC}"
+            PID=$(pgrep -f "$SCRIPT_NAME")
+            if [ -n "$PID" ]; then
+                echo "Found process with PID: $PID. Terminating immediately..."
+                kill -9 "$PID"
+                sleep 1 # Brief pause to allow the OS to process the kill command
+                if pgrep -f "$SCRIPT_NAME" > /dev/null; then
+                    echo -e "${RED}Error: Failed to kill the process. It might be unresponsive.${NC}"
+                    exit 1
+                else
+                    echo -e "${GREEN}Process successfully terminated.${NC}"
+                    exit 0
+                fi
+            else
+                echo -e "${GREEN}No running process found. Nothing to kill.${NC}"
+                exit 0
+            fi
+            ;;
+        --force)
+            FORCE_RESTART=true
+            shift
+            ;;
+        -b|--branch)
+            if [ -z "$2" ]; then
+                echo -e "${RED}Error: Missing branch name for '$1'.${NC}"
+                exit 1
+            fi
+            GIT_BRANCH="$2"
+            shift 2
+            ;;
+        *)
+            echo -e "${RED}Error: Unknown option '$1'${NC}\n"
+            show_help
+            exit 1
+            ;;
+    esac
+done
 
 
 # --- Main Script Logic ---
@@ -84,7 +126,6 @@ if [ "$FORCE_RESTART" = false ]; then
         # Wait for all ongoing operations to finish
         while true; do
             # Check for any active operations (download, upload, conversion, extraction)
-            # This includes archive files, extracted directories, compressed videos, and temporary files
             # The find command will exit with success (0) if it finds any matching file
             if find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( \
                 -type d -name 'extracted_*' -o \
@@ -105,7 +146,6 @@ if [ "$FORCE_RESTART" = false ]; then
     else
         echo -e "${YELLOW} - Process is not running. Checking for leftover files from a previous run...${NC}"
         # Find temporary files/directories and clean them
-        # Using a direct find -exec for efficiency
         find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( \
             -type d -name 'extracted_*' -o \
             -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' -o \
@@ -116,7 +156,7 @@ if [ "$FORCE_RESTART" = false ]; then
             -name '*.part' \
         \) -exec rm -rf {} +
 
-        # Check if anything was actually deleted by re-running the find command
+        # Check if anything was actually deleted
         if find "$DATA_DIR" -maxdepth 1 -mindepth 1 \( -type d -name 'extracted_*' -o -iname '*.part' \) -print -quit | grep -q .; then
              echo -e "${YELLOW} - Some leftover files may remain.${NC}"
         else
@@ -130,7 +170,6 @@ fi
 
 # 2. Kill the existing process (if it's running)
 echo -e "\n${YELLOW}[Step 2/6] Checking for existing process...${NC}"
-# Use pgrep to find the Process ID (PID). The -f flag matches the full command line.
 PID=$(pgrep -f "$SCRIPT_NAME")
 
 if [ -n "$PID" ]; then
@@ -139,11 +178,8 @@ if [ -n "$PID" ]; then
         kill -9 "$PID"
     else
         echo "Gracefully terminating process with PID: $PID."
-        # Send SIGTERM first to allow graceful shutdown
         kill -TERM "$PID"
-        # Wait a bit for graceful shutdown
         sleep 5
-        # Check if process still exists, force kill if needed
         if pgrep -f "$SCRIPT_NAME" > /dev/null; then
             echo "Process still running after SIGTERM. Force-killing..."
             kill -9 "$PID"
@@ -158,11 +194,11 @@ fi
 
 # 3. Update the code using git pull
 echo -e "\n${YELLOW}[Step 3/6] Pulling latest changes from git...${NC}"
-# Execute git pull and check if it was successful.
-if git pull; then
+BRANCH_TO_PULL="${GIT_BRANCH:-$DEFAULT_BRANCH}"
+echo -e "${YELLOW} - Pulling branch '${BRANCH_TO_PULL}' from origin...${NC}"
+if git pull origin "$BRANCH_TO_PULL"; then
     echo -e "${GREEN}Git pull successful.${NC}"
 else
-    # If git pull fails, exit the script to prevent running old/broken code.
     echo -e "${RED}Error: Git pull failed. Aborting script.${NC}"
     exit 1
 fi
@@ -182,14 +218,10 @@ fi
 
 # 5. Start the script again using nohup
 echo -e "\n${YELLOW}[Step 5/6] Starting the script in the background...${NC}"
-# Use nohup to run the process so it doesn't stop when you close the terminal.
-# The '&' at the end runs the command in the background.
-# Output will be redirected to a file named 'nohup.out' in the PROJECT_DIR.
 nohup "$PYTHON_EXEC" "$SCRIPT_PATH" &
 
 # 6. Verify that the process is running
 echo -e "\n${YELLOW}[Step 6/6] Verifying that the process has restarted...${NC}"
-# Give the script a couple of seconds to initialize
 sleep 2
 NEW_PID=$(pgrep -f "$SCRIPT_NAME")
 

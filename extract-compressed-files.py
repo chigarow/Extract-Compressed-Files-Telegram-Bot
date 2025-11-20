@@ -21,6 +21,7 @@ import os
 import asyncio
 import time
 import sys
+import json
 from datetime import datetime
 from telethon import events
 from telethon.errors import FloodWaitError, FileReferenceExpiredError
@@ -36,6 +37,7 @@ from utils import (
     ARCHIVE_EXTENSIONS, MEDIA_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS,
     MAX_ARCHIVE_GB, DATA_DIR, LOG_FILE, MIN_PCT_STEP, MIN_EDIT_INTERVAL,
     FAST_DOWNLOAD_ENABLED, FAST_DOWNLOAD_CONNECTIONS, WIFI_ONLY_MODE,
+    FAILED_UPLOADS_FILE, RECOVERY_DIR, QUARANTINE_DIR,
     
     # Utility functions
     human_size, format_eta, setup_logger,
@@ -46,7 +48,7 @@ from utils import (
     # Media processing
     is_ffmpeg_available, is_ffprobe_available, validate_video_file,
     is_telegram_compatible_video, needs_video_processing,
-    compress_video_for_telegram, get_video_attributes_and_thumbnail,
+    compress_video_for_telegram, get_video_attributes_and_thumbnail, convert_video_for_recovery,
     
     # Cache and persistence
     CacheManager, ProcessManager, FailedOperationsManager,
@@ -89,11 +91,40 @@ except ImportError:
     FAST_DOWNLOAD_AVAILABLE = False
     logger.warning("FastTelethon module not available - download acceleration disabled. Run: pip install cryptg for better performance.")
 
-# Initialize global managers
+# Failed upload persistence helpers
+def _load_failed_media_files() -> list:
+    """Load failed media file metadata from disk."""
+    if not os.path.exists(FAILED_UPLOADS_FILE):
+        return []
+    
+    try:
+        with open(FAILED_UPLOADS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            logger.warning(f"Unexpected format in {FAILED_UPLOADS_FILE}, resetting list")
+    except Exception as e:
+        logger.error(f"Failed to load failed uploads file: {e}")
+    
+    return []
+
+
+def _save_failed_media_files():
+    """Persist failed media metadata to disk."""
+    try:
+        os.makedirs(os.path.dirname(FAILED_UPLOADS_FILE), exist_ok=True)
+        with open(FAILED_UPLOADS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(failed_media_files, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save failed uploads file: {e}")
+
+
+# Initialize global managers and state
+failed_media_files = _load_failed_media_files()
 cache_manager = CacheManager()
 process_manager = ProcessManager()
 failed_ops_manager = FailedOperationsManager()
-queue_manager = get_queue_manager()
+queue_manager = get_queue_manager(failed_uploads_list=failed_media_files)
 processing_queue = get_processing_queue()
 
 # Get Telegram client
@@ -250,6 +281,78 @@ async def save_current_processes():
 
 
 # Archive and media processing is now handled by the queue system
+
+
+async def _handle_failed_uploads():
+    """Process failed uploads by converting and retrying."""
+    if not failed_media_files:
+        logger.info("No failed media uploads detected for recovery.")
+        return
+    
+    logger.info(f"Starting recovery phase for {len(failed_media_files)} failed media file(s).")
+    recovered = 0
+    quarantined = 0
+    
+    # Work on a copy to avoid mutation issues while iterating
+    for entry in list(failed_media_files):
+        file_path = entry.get("file_path")
+        chat_id = entry.get("chat_id")
+        caption = entry.get("caption") or ""
+        original_filename = entry.get("original_filename") or os.path.basename(file_path or "")
+        status = entry.get("status", "pending")
+        
+        if not file_path or not os.path.exists(file_path):
+            logger.warning(f"Skipping missing failed file: {file_path}")
+            entry["status"] = "missing"
+            continue
+        
+        try:
+            entry["status"] = "converting"
+            _save_failed_media_files()
+            
+            converted_path = convert_video_for_recovery(file_path)
+            if not converted_path or not os.path.exists(converted_path):
+                logger.error(f"Conversion failed for recovery item: {file_path}")
+                entry["status"] = "conversion_failed"
+                continue
+            
+            entry["status"] = "uploading"
+            entry["converted_path"] = converted_path
+            _save_failed_media_files()
+            
+            # Re-upload using Telegram operations
+            target = await ensure_target_entity(client)
+            telegram_ops = TelegramOperations(client)
+            await telegram_ops.upload_media_file(target, converted_path, caption=caption)
+            recovered += 1
+            entry["status"] = "recovered"
+            
+            # Cleanup files
+            for p in (file_path, converted_path):
+                try:
+                    if p and os.path.exists(p):
+                        os.remove(p)
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to remove file during recovery cleanup: {cleanup_error}")
+            
+        except Exception as e:
+            quarantined += 1
+            entry["status"] = "quarantine"
+            try:
+                if file_path and os.path.exists(file_path):
+                    dest_path = os.path.join(QUARANTINE_DIR, os.path.basename(file_path))
+                    os.replace(file_path, dest_path)
+            except Exception as move_error:
+                logger.warning(f"Failed to move file to quarantine: {move_error}")
+            logger.error(f"Recovery upload failed for {file_path}: {e}")
+        finally:
+            _save_failed_media_files()
+    
+    # Remove recovered entries
+    failed_media_files[:] = [e for e in failed_media_files if e.get("status") not in ("recovered",)]
+    _save_failed_media_files()
+    
+    logger.info(f"Recovery phase complete. Recovered: {recovered}, Quarantined: {quarantined}, Remaining: {len(failed_media_files)}")
 
 
 async def handle_torbox_link(event, torbox_url: str):
@@ -697,6 +800,9 @@ async def main_async():
     finally:
         # Clean up
         try:
+            # Attempt recovery for any failed media uploads before shutting down
+            await _handle_failed_uploads()
+            
             if save_task:
                 save_task.cancel()
             if retry_task:

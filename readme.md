@@ -36,6 +36,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **[Automatic File Cleanup](.documentation_feature/automatic-file-cleanup.md)**: **NEW: Manual cleanup commands to remove old files and orphaned directories, recovering disk space.** Includes safety confirmations and protected file lists. See [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md) for details.
 - **[Organized File Structure](.documentation_feature/organized-file-structure.md)**: **NEW: Dedicated `data/torbox/` directory for all Torbox downloads, keeping the main data directory clean and organized.**
 - **[System Monitoring Tools](.documentation_feature/system-monitoring-tools.md)**: **NEW: Built-in monitoring script (`monitor_system.py`) provides detailed reports on disk usage, old files, and cleanup recommendations.**
+- **[WebDAV Chunking for Memory Optimization](.documentation_feature/webdav-chunking-memory-optimization.md)**: **NEW: Configurable chunk sizes for WebDAV downloads to prevent out-of-memory crashes on low-RAM devices like Termux. Downloads files in small chunks (default 1 MB) with automatic resume support.**
 
 ## Security
 

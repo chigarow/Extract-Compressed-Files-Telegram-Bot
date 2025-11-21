@@ -874,9 +874,18 @@ class QueueManager:
             return
 
         discovered = 0
+        skipped = 0
         try:
             async for item in client.walk_files(remote_path):
                 relative_path = self._sanitize_webdav_relative_path(item.path)
+                file_ext = os.path.splitext(relative_path)[1].lower()
+                
+                # Skip non-media files during crawl to save bandwidth
+                if file_ext not in MEDIA_EXTENSIONS:
+                    skipped += 1
+                    logger.debug(f"Skipping non-media file: {item.path} (extension: {file_ext})")
+                    continue
+                
                 temp_path = os.path.join(WEBDAV_DIR, relative_path)
                 file_task = {
                     'type': 'webdav_file_download',
@@ -899,13 +908,19 @@ class QueueManager:
                     logger.warning(f"Failed to send crawl error: {reply_error}")
             return
 
-        logger.info(f"Discovered {discovered} WebDAV files under {display_name}")
+        logger.info(f"Discovered {discovered} media files under {display_name} (skipped {skipped} non-media)")
         if live_event:
             try:
                 if discovered:
-                    await event.reply(f'📁 Queued {discovered} files from {display_name}.')
+                    summary = f'📁 Queued {discovered} media file{"s" if discovered != 1 else ""} from {display_name}.'
+                    if skipped > 0:
+                        summary += f' (Skipped {skipped} non-media file{"s" if skipped != 1 else ""})'
+                    await event.reply(summary)
                 else:
-                    await event.reply(f'ℹ️ No downloadable files found in {display_name}.')
+                    if skipped > 0:
+                        await event.reply(f'ℹ️ No media files found in {display_name} ({skipped} non-media file{"s" if skipped != 1 else ""} skipped).')
+                    else:
+                        await event.reply(f'ℹ️ No files found in {display_name}.')
             except Exception as reply_error:
                 logger.debug(f"Failed to send WebDAV summary: {reply_error}")
 
@@ -924,6 +939,12 @@ class QueueManager:
 
         if not remote_path or not temp_path:
             logger.error(f"WebDAV file task missing required data: {filename}")
+            return
+        
+        # Safety check: skip non-media files (should be filtered at walk time)
+        file_ext = os.path.splitext(temp_path)[1].lower()
+        if file_ext not in MEDIA_EXTENSIONS:
+            logger.info(f"Skipping non-media file: {filename} (extension: {file_ext})")
             return
 
         try:

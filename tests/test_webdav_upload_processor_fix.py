@@ -69,12 +69,12 @@ class TestPersistentQueueSafety:
         
         manager._execute_upload_task = boom
         
-        file_path = tmp_path / "file.txt"
-        file_path.write_text("data")
+        file_path = tmp_path / "file.jpg"
+        file_path.write_bytes(b"fake image data")
         
         task = {
-            'type': 'webdav_document_upload',
-            'filename': 'file.txt',
+            'type': 'webdav_media_upload',
+            'filename': 'file.jpg',
             'file_path': str(file_path),
             'size_bytes': file_path.stat().st_size,
             'retry_count': 0
@@ -93,7 +93,7 @@ class TestPersistentQueueSafety:
         
         persisted = manager.upload_persistent.get_items()
         assert len(persisted) == 1, "Task should remain persisted after processor error"
-        assert persisted[0]['filename'] == 'file.txt'
+        assert persisted[0]['filename'] == 'file.jpg'
     
     @pytest.mark.asyncio
     async def test_upload_task_removed_after_success(self, tmp_path, monkeypatch):
@@ -110,12 +110,12 @@ class TestPersistentQueueSafety:
         
         manager._execute_upload_task = succeed
         
-        file_path = tmp_path / "file2.txt"
-        file_path.write_text("data")
+        file_path = tmp_path / "file2.mp4"
+        file_path.write_bytes(b"fake video data")
         
         task = {
-            'type': 'webdav_document_upload',
-            'filename': 'file2.txt',
+            'type': 'webdav_media_upload',
+            'filename': 'file2.mp4',
             'file_path': str(file_path),
             'size_bytes': file_path.stat().st_size,
             'retry_count': 0
@@ -143,9 +143,9 @@ class TestWebDAVUploadProcessorContinuity:
         tasks = []
         for i in range(5):
             task = {
-                'type': 'webdav_document_upload',
-                'filename': f'file{i}.txt',
-                'file_path': f'/tmp/file{i}.txt',
+                'type': 'webdav_media_upload',
+                'filename': f'file{i}.jpg',
+                'file_path': f'/tmp/file{i}.jpg',
                 'size_bytes': 1000,
                 'retry_count': 0
             }
@@ -191,9 +191,9 @@ class TestWebDAVUploadProcessorContinuity:
         # Add multiple upload tasks
         for i in range(3):
             task = {
-                'type': 'webdav_document_upload',
-                'filename': f'file{i}.txt',
-                'file_path': f'/tmp/file{i}.txt',
+                'type': 'webdav_media_upload',
+                'filename': f'file{i}.mp4',
+                'file_path': f'/tmp/file{i}.mp4',
                 'size_bytes': 1000,
                 'retry_count': 0
             }
@@ -267,7 +267,7 @@ class TestWebDAVDownloadAndQueue:
     
     @pytest.mark.asyncio
     async def test_webdav_walk_discovers_all_files(self, queue_manager, mock_webdav_client):
-        """Test that WebDAV walk discovers and queues all files."""
+        """Test that WebDAV walk discovers and queues only media files."""
         # Create mock WebDAV items
         from utils.webdav_client import WebDAVItem
         
@@ -275,6 +275,9 @@ class TestWebDAVDownloadAndQueue:
             WebDAVItem(path=f'/remote/file{i}.jpg', name=f'file{i}.jpg', is_dir=False, size=1000)
             for i in range(28)  # Test with 28 files like in the bug report
         ]
+        # Add some non-media files that should be skipped
+        mock_items.append(WebDAVItem(path='/remote/readme.txt', name='readme.txt', is_dir=False, size=100))
+        mock_items.append(WebDAVItem(path='/remote/data.pdf', name='data.pdf', is_dir=False, size=200))
         
         async def mock_walk_files(path):
             for item in mock_items:
@@ -293,20 +296,20 @@ class TestWebDAVDownloadAndQueue:
         with patch('utils.webdav_client.get_webdav_client', return_value=mock_webdav_client):
             await queue_manager._execute_webdav_walk_task(task)
         
-        # Verify all 28 files were queued for download
+        # Verify only 28 media files were queued (2 non-media files should be skipped)
         assert queue_manager.download_queue.qsize() == 28, f"Expected 28 download tasks, got {queue_manager.download_queue.qsize()}"
 
     @pytest.mark.asyncio
     async def test_webdav_resume_skips_redownload(self, queue_manager, mock_webdav_client, tmp_path):
         """Ensure existing downloaded file is reused after crash/restart without re-downloading."""
         queue_manager._disable_upload_worker_start = True
-        existing_file = tmp_path / "resume.gif"
+        existing_file = tmp_path / "resume.mp4"
         existing_file.write_bytes(b"cached-data")
 
         task = {
             'type': 'webdav_file_download',
-            'filename': 'resume.gif',
-            'remote_path': '/remote/resume.gif',
+            'filename': 'resume.mp4',
+            'remote_path': '/remote/resume.mp4',
             'temp_path': str(existing_file),
             'size_bytes': existing_file.stat().st_size,
             'event': None
@@ -322,7 +325,7 @@ class TestWebDAVDownloadAndQueue:
         assert queue_manager.upload_queue.qsize() == 1
         upload_task = await queue_manager.upload_queue.get()
         assert upload_task['file_path'] == str(existing_file)
-        assert upload_task['filename'] == 'resume.gif'
+        assert upload_task['filename'] == 'resume.mp4'
         queue_manager.upload_queue.task_done()
 
 
@@ -338,9 +341,9 @@ class TestEnhancedLogging:
         # Add tasks
         for i in range(3):
             task = {
-                'type': 'webdav_document_upload',
-                'filename': f'file{i}.txt',
-                'file_path': f'/tmp/file{i}.txt',
+                'type': 'webdav_media_upload',
+                'filename': f'file{i}.png',
+                'file_path': f'/tmp/file{i}.png',
                 'size_bytes': 1000,
                 'retry_count': 0
             }
@@ -412,7 +415,12 @@ class TestWebDAVSequentialMode:
     @pytest.mark.asyncio
     async def test_webdav_sequential_waits_for_upload(self, queue_manager, tmp_path, monkeypatch):
         """Next WebDAV download should not start until the prior upload finishes."""
-        queue_manager._disable_upload_worker_start = False
+        # Start fresh upload worker for this test
+        if queue_manager.upload_task and not queue_manager.upload_task.done():
+            queue_manager.upload_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await queue_manager.upload_task
+        
         queue_manager.webdav_sequential = True
         monkeypatch.setattr('utils.queue_manager.WEBDAV_DIR', str(tmp_path / 'webdav_seq'))
         os.makedirs(tmp_path / 'webdav_seq', exist_ok=True)
@@ -435,8 +443,11 @@ class TestWebDAVSequentialMode:
 
         queue_manager._execute_upload_task = mock_upload
 
+        # Start the upload worker
+        queue_manager.upload_task = asyncio.create_task(queue_manager._process_upload_queue())
+
         tasks = []
-        for name in ("one.gif", "two.gif"):
+        for name in ("one.mp4", "two.mp4"):
             task = {
                 'type': 'webdav_file_download',
                 'filename': name,
@@ -449,25 +460,30 @@ class TestWebDAVSequentialMode:
             await queue_manager.download_queue.put(task)
             queue_manager.download_persistent.add_item(task)
 
-        with patch('utils.webdav_client.get_webdav_client', return_value=mock_webdav_client):
-            download_worker = asyncio.create_task(queue_manager._process_download_queue())
-            await asyncio.wait_for(queue_manager.download_queue.join(), timeout=5)
-            await asyncio.wait_for(queue_manager.upload_queue.join(), timeout=5)
+        try:
+            with patch('utils.webdav_client.get_webdav_client', return_value=mock_webdav_client):
+                download_worker = asyncio.create_task(queue_manager._process_download_queue())
+                
+                # Wait for downloads to complete
+                await asyncio.wait_for(queue_manager.download_queue.join(), timeout=5)
+                # Wait for uploads to complete
+                await asyncio.wait_for(queue_manager.upload_queue.join(), timeout=5)
 
-            download_worker.cancel()
-            with suppress(asyncio.CancelledError):
-                await download_worker
+                download_worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await download_worker
+        finally:
             if queue_manager.upload_task:
                 queue_manager.upload_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await queue_manager.upload_task
 
-        assert order.index("upload:one.gif") < order.index("download:two.gif"), "Second download should wait for first upload"
+        assert order.index("upload:one.mp4") < order.index("download:two.mp4"), "Second download should wait for first upload"
         assert order == [
-            "download:one.gif",
-            "upload:one.gif",
-            "download:two.gif",
-            "upload:two.gif",
+            "download:one.mp4",
+            "upload:one.mp4",
+            "download:two.mp4",
+            "upload:two.mp4",
         ]
 
 
@@ -479,9 +495,9 @@ class TestErrorRecovery:
         """Test that failed tasks are added to retry queue."""
         # Create a task that will fail
         task = {
-            'type': 'webdav_document_upload',
-            'filename': 'test.txt',
-            'file_path': '/nonexistent/file.txt',  # File doesn't exist
+            'type': 'webdav_media_upload',
+            'filename': 'test.jpg',
+            'file_path': '/nonexistent/file.jpg',  # File doesn't exist
             'size_bytes': 1000,
             'retry_count': 0,
             'event': None
@@ -502,7 +518,7 @@ class TestErrorRecovery:
         
         # Verify task was added to retry queue
         assert len(retry_calls) > 0, "Failed task should be added to retry queue"
-        assert retry_calls[0]['filename'] == 'test.txt'
+        assert retry_calls[0]['filename'] == 'test.jpg'
         assert retry_calls[0]['retry_count'] == 1
 
 
@@ -516,9 +532,9 @@ class TestQueueContinuity:
         task_count = 10
         for i in range(task_count):
             task = {
-                'type': 'webdav_document_upload',
-                'filename': f'file{i}.txt',
-                'file_path': f'/tmp/file{i}.txt',
+                'type': 'webdav_media_upload',
+                'filename': f'file{i}.mp4',
+                'file_path': f'/tmp/file{i}.mp4',
                 'size_bytes': 1000,
                 'retry_count': 0
             }

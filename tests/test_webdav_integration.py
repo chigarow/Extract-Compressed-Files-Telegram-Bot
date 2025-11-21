@@ -63,12 +63,43 @@ def queue_manager(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_webdav_walk_skips_all_non_media(queue_manager, monkeypatch):
+    """Crawling a path with only non-media files should enqueue nothing."""
+
+    items = [
+        WebDAVItem(path='Documents/readme.txt', name='Documents/readme.txt', is_dir=False, size=1024),
+        WebDAVItem(path='Documents/notes.pdf', name='Documents/notes.pdf', is_dir=False, size=2048),
+        WebDAVItem(path='Documents/data.json', name='Documents/data.json', is_dir=False, size=512),
+    ]
+    stub_client = StubWebDAVClient(items)
+    monkeypatch.setattr('utils.webdav_client.get_webdav_client', AsyncMock(return_value=stub_client))
+
+    event = DummyEvent()
+    task = {
+        'type': 'webdav_walk_download',
+        'remote_path': '/Documents',
+        'display_name': 'Documents',
+        'filename': 'WebDAV: Documents',
+        'event': event
+    }
+
+    await queue_manager._execute_webdav_walk_task(task)
+
+    # No media files, so queue should be empty
+    assert queue_manager.download_queue.qsize() == 0
+    # User should be notified that no media was found
+    assert 'No media files found' in event.messages[-1]
+    assert '3 non-media' in event.messages[-1]
+
+
+@pytest.mark.asyncio
 async def test_webdav_walk_enqueues_download_tasks(queue_manager, monkeypatch):
-    """Crawling a WebDAV path should enqueue file download tasks with sanitized paths."""
+    """Crawling a WebDAV path should enqueue only media file download tasks with sanitized paths."""
 
     items = [
         WebDAVItem(path='Milacat/Photo One.jpg', name='Milacat/Photo One.jpg', is_dir=False, size=1024),
-        WebDAVItem(path='Milacat/SubFolder/Clip.mp4', name='Milacat/SubFolder/Clip.mp4', is_dir=False, size=2048)
+        WebDAVItem(path='Milacat/SubFolder/Clip.mp4', name='Milacat/SubFolder/Clip.mp4', is_dir=False, size=2048),
+        WebDAVItem(path='Milacat/readme.txt', name='Milacat/readme.txt', is_dir=False, size=512),  # Should be skipped
     ]
     stub_client = StubWebDAVClient(items)
     monkeypatch.setattr('utils.webdav_client.get_webdav_client', AsyncMock(return_value=stub_client))
@@ -84,13 +115,15 @@ async def test_webdav_walk_enqueues_download_tasks(queue_manager, monkeypatch):
 
     await queue_manager._execute_webdav_walk_task(task)
 
+    # Only 2 media files should be enqueued (txt file should be skipped)
     assert queue_manager.download_queue.qsize() == 2
     queued = [queue_manager.download_queue.get_nowait() for _ in range(queue_manager.download_queue.qsize())]
     assert all(item['type'] == 'webdav_file_download' for item in queued)
     assert queued[0]['temp_path'].endswith(os.path.join('Milacat', 'Photo_One.jpg'))
     assert queued[1]['temp_path'].endswith(os.path.join('Milacat', 'SubFolder', 'Clip.mp4'))
-    # Ensure user notified about discovered files
-    assert event.messages[-1].startswith('📁 Queued 2 files')
+    # Ensure user notified about discovered files and skipped count
+    assert '2 media file' in event.messages[-1]
+    assert 'Skipped 1 non-media' in event.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -120,8 +153,8 @@ async def test_webdav_file_download_media_enqueue(queue_manager, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_webdav_file_download_document_enqueue(queue_manager, monkeypatch):
-    """Non-media WebDAV files should be enqueued directly for upload."""
+async def test_webdav_file_download_skips_non_media(queue_manager, monkeypatch):
+    """Non-media WebDAV files should be skipped without download or upload."""
 
     stub_client = StubWebDAVClient()
     monkeypatch.setattr('utils.webdav_client.get_webdav_client', AsyncMock(return_value=stub_client))
@@ -140,9 +173,9 @@ async def test_webdav_file_download_document_enqueue(queue_manager, monkeypatch)
 
     await queue_manager._execute_webdav_file_task(doc_task)
 
-    queue_manager.add_upload_task.assert_awaited_once()
-    queued_task = queue_manager.add_upload_task.await_args.args[0]
-    assert queued_task['type'] == 'webdav_document_upload'
+    # Should not download or enqueue upload
+    queue_manager.add_upload_task.assert_not_awaited()
+    assert not os.path.exists(doc_path)
 
 
 @pytest.mark.asyncio

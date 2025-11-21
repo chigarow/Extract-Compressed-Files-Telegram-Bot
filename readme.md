@@ -28,6 +28,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **[Configurable Limits](.documentation_feature/configurable-limits.md)**: Adjustable settings for maximum file size, disk space requirements, and concurrent processing.
 - **[Queue Monitoring](.documentation_feature/queue-monitoring.md)**: Built-in status command to check current processing state.
 - **[Sequential File Processing](.documentation_feature/sequential-file-processing.md)**: Files are processed one at a time (download → compress → upload → cleanup) to minimize memory usage on low-resource devices.
+- **[Singleton Startup Lock](.documentation_feature/singleton-startup-lock.md)**: Prevents concurrent instances after crashes/restarts by enforcing a PID-based lock at startup and applies a 15s SQLite session timeout to mitigate Telethon `database is locked` errors.
 - **[Network Monitoring](.documentation_feature/network-monitoring.md)**: WiFi-only mode with intelligent network detection for mobile data conservation.
 - **[Battery Monitoring](.documentation_feature/battery-monitoring.md)**: Built-in battery status monitoring for Termux users.
 - **[Compression Timeout Control](.documentation_feature/compression-timeout-control.md)**: Configurable timeout settings for video compression operations.

@@ -15,7 +15,7 @@ from .constants import (
     DOWNLOAD_SEMAPHORE_LIMIT, UPLOAD_SEMAPHORE_LIMIT, MAX_RETRY_ATTEMPTS,
     RETRY_BASE_INTERVAL, STREAMING_EXTRACTION_ENABLED, STREAMING_MIN_FREE_GB,
     STREAMING_LOW_SPACE_CHECK_INTERVAL, STREAMING_MANIFEST_DIR, TORBOX_DIR,
-    WEBDAV_DIR, MEDIA_EXTENSIONS, DATA_DIR, FAILED_UPLOADS_FILE,
+    WEBDAV_DIR, MEDIA_EXTENSIONS, PHOTO_EXTENSIONS, VIDEO_EXTENSIONS, DATA_DIR, FAILED_UPLOADS_FILE,
     WEBDAV_SEQUENTIAL_MODE
 )
 from .file_operations import compute_sha256
@@ -143,6 +143,126 @@ class StreamingBatchBuilder:
         self.buffers[media_type] = []
 
 
+class WebDAVAlbumBatcher:
+    """Accumulates WebDAV downloads and dispatches grouped album uploads per source."""
+
+    def __init__(self, queue_manager, event, display_name: str):
+        """
+        Initialize batching for a WebDAV source.
+        
+        Args:
+            queue_manager: QueueManager instance to enqueue grouped uploads
+            event: Telegram event for notifications (can be None)
+            display_name: Source identifier (WebDAV path) for grouping
+        """
+        self.queue_manager = queue_manager
+        self.event = event
+        self.display_name = display_name
+        self.buffers = {'images': [], 'videos': []}  # Separate buffers by media type
+        self.batch_counters = {'images': 0, 'videos': 0}
+        self.total_queued = 0
+        self.expected_files = 0  # Will be set when walk completes
+        self.completed_files = 0  # Track completed downloads
+
+    def set_expected_files(self, count: int):
+        """Set the expected number of files to download from this source."""
+        self.expected_files = count
+        logger.info(f"WebDAV batcher for {self.display_name} expects {count} files")
+
+    async def add_file(self, file_path: str, filename: str, source_webdav_path: str, size_bytes: int):
+        """
+        Add a completed WebDAV download to the batch.
+        
+        Automatically dispatches when buffer reaches TELEGRAM_ALBUM_MAX_FILES (10).
+        """
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        # Determine media type based on extension
+        if file_ext in PHOTO_EXTENSIONS:
+            media_type = 'images'
+        elif file_ext in VIDEO_EXTENSIONS:
+            media_type = 'videos'
+        else:
+            # Fallback for other media extensions
+            media_type = 'images'
+        
+        file_info = {
+            'file_path': file_path,
+            'filename': filename,
+            'source_webdav_path': source_webdav_path,
+            'size_bytes': size_bytes
+        }
+        
+        self.buffers[media_type].append(file_info)
+        self.total_queued += 1
+        self.completed_files += 1
+        
+        logger.info(f"WebDAV batcher for {self.display_name}: {self.completed_files}/{self.expected_files} files completed")
+        
+        # Auto-dispatch if buffer is full
+        if len(self.buffers[media_type]) >= TELEGRAM_ALBUM_MAX_FILES:
+            await self._dispatch(media_type)
+        
+        # Auto-flush if all expected files are downloaded
+        if self.expected_files > 0 and self.completed_files >= self.expected_files:
+            logger.info(f"All files downloaded for {self.display_name}, flushing batcher")
+            await self.flush()
+
+    async def flush(self):
+        """Dispatch all remaining files. Call when WebDAV walk completes."""
+        # Dispatch images first, then videos (Telegram album ordering)
+        for media_type in ('images', 'videos'):
+            if self.buffers[media_type]:
+                await self._dispatch(media_type)
+        
+        # Send completion message
+        if self.event and hasattr(self.event, 'reply') and callable(getattr(self.event, 'reply')):
+            try:
+                total_albums = self.batch_counters['images'] + self.batch_counters['videos']
+                if total_albums > 0:
+                    await self.event.reply(
+                        f'✅ All media from {self.display_name} has been uploaded '
+                        f'({total_albums} album{"s" if total_albums != 1 else ""})'
+                    )
+            except Exception as e:
+                logger.debug(f"Failed to send completion message: {e}")
+
+    async def _dispatch(self, media_type: str):
+        """Create and enqueue a grouped upload task for accumulated files."""
+        files = self.buffers[media_type]
+        if not files:
+            return
+
+        self.batch_counters[media_type] += 1
+        batch_num = self.batch_counters[media_type]
+        
+        # Build grouped upload task
+        filename = (
+            f"{self.display_name} - {media_type.title()} Album {batch_num}"
+            f" ({len(files)} files)"
+        )
+
+        upload_task = {
+            'type': 'grouped_media',
+            'media_type': media_type,
+            'event': self.event,
+            'file_paths': [f['file_path'] for f in files],
+            'filename': filename,
+            'source_webdav': self.display_name,  # Mark as WebDAV source
+            'is_grouped': True,
+            'cleanup_file_paths': True,
+            'webdav_quiet_mode': True,  # Suppress per-file progress notifications
+            'retry_count': 0
+        }
+
+        logger.info(
+            f"📦 WebDAV album ready: {media_type} batch {batch_num} with {len(files)} files from {self.display_name}"
+        )
+
+        await self.queue_manager.add_upload_task(upload_task)
+        self.buffers[media_type] = []
+
+
 class BackwardsCompatibleQueue(asyncio.Queue):
     """
     Extends asyncio.Queue with backwards compatibility methods for legacy tests.
@@ -261,6 +381,9 @@ class QueueManager:
         # Add extraction cleanup registry
         self.extraction_cleanup_registry = ExtractionCleanupRegistry()
         self.archive_cleanup_registry = ArchiveCleanupRegistry()
+        
+        # WebDAV album batchers (keyed by display_name)
+        self.webdav_batchers = {}
         
         logger.info("QueueManager initialized with backwards-compatible queues for legacy test support")
         
@@ -862,6 +985,11 @@ class QueueManager:
         event = task.get('event')
         live_event = event and hasattr(event, 'reply') and callable(getattr(event, 'reply'))
 
+        # Create WebDAV album batcher for this source
+        batcher = WebDAVAlbumBatcher(self, event, display_name)
+        self.webdav_batchers[display_name] = batcher
+        logger.info(f"Created WebDAV album batcher for source: {display_name}")
+
         try:
             client = await get_webdav_client()
         except Exception as exc:
@@ -871,6 +999,9 @@ class QueueManager:
                     await event.reply(f'❌ Could not connect to WebDAV: {exc}')
                 except Exception as reply_error:
                     logger.warning(f"Failed to notify WebDAV error: {reply_error}")
+            # Clean up batcher
+            if display_name in self.webdav_batchers:
+                del self.webdav_batchers[display_name]
             return
 
         discovered = 0
@@ -906,9 +1037,17 @@ class QueueManager:
                     await event.reply(f'❌ WebDAV crawl failed for {display_name}: {exc}')
                 except Exception as reply_error:
                     logger.warning(f"Failed to send crawl error: {reply_error}")
+            # Clean up batcher
+            if display_name in self.webdav_batchers:
+                del self.webdav_batchers[display_name]
             return
 
         logger.info(f"Discovered {discovered} media files under {display_name} (skipped {skipped} non-media)")
+        
+        # Set expected file count on batcher
+        if display_name in self.webdav_batchers:
+            self.webdav_batchers[display_name].set_expected_files(discovered)
+        
         if live_event:
             try:
                 if discovered:
@@ -921,6 +1060,9 @@ class QueueManager:
                         await event.reply(f'ℹ️ No media files found in {display_name} ({skipped} non-media file{"s" if skipped != 1 else ""} skipped).')
                     else:
                         await event.reply(f'ℹ️ No files found in {display_name}.')
+                    # Clean up batcher if no files found
+                    if display_name in self.webdav_batchers:
+                        del self.webdav_batchers[display_name]
             except Exception as reply_error:
                 logger.debug(f"Failed to send WebDAV summary: {reply_error}")
 
@@ -1010,23 +1152,37 @@ class QueueManager:
         file_ext = os.path.splitext(temp_path)[1].lower()
         size_bytes = os.path.getsize(temp_path) if os.path.exists(temp_path) else task.get('size_bytes', 0)
         
-        # Determine task type based on extension
-        is_media = file_ext in MEDIA_EXTENSIONS
-        upload_task_type = 'webdav_media_upload' if is_media else 'webdav_document_upload'
+        # Feed the WebDAV album batcher instead of directly queuing upload
+        batcher = self.webdav_batchers.get(display_name)
+        if batcher:
+            logger.info(f"📦 Adding {filename} to WebDAV album batcher for {display_name}")
+            await batcher.add_file(temp_path, filename, remote_path, size_bytes)
+            
+            # Delete the download status message to reduce clutter
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception as del_error:
+                    logger.debug(f"Failed to delete download status message: {del_error}")
+        else:
+            # Fallback: no batcher found, queue individual upload (backward compatibility)
+            logger.warning(f"No WebDAV batcher found for {display_name}, queuing individual upload")
+            is_media = file_ext in MEDIA_EXTENSIONS
+            upload_task_type = 'webdav_media_upload' if is_media else 'webdav_document_upload'
 
-        upload_task = {
-            'type': upload_task_type,
-            'event': event if live_event else None,
-            'file_path': temp_path,
-            'filename': filename,
-            'size_bytes': size_bytes,
-            'source_webdav_path': remote_path,
-            'retry_count': 0
-        }
+            upload_task = {
+                'type': upload_task_type,
+                'event': event if live_event else None,
+                'file_path': temp_path,
+                'filename': filename,
+                'size_bytes': size_bytes,
+                'source_webdav_path': remote_path,
+                'retry_count': 0
+            }
 
-        logger.info(f"📤 Queuing upload task for {filename} (type: {upload_task_type})")
-        await self.add_upload_task(upload_task)
-        logger.info(f"✅ Upload task queued successfully for {filename}")
+            logger.info(f"📤 Queuing upload task for {filename} (type: {upload_task_type})")
+            await self.add_upload_task(upload_task)
+            logger.info(f"✅ Upload task queued successfully for {filename}")
         
         if self.webdav_sequential and not getattr(self, '_disable_upload_worker_start', False):
             logger.info("⏸️ Sequential WebDAV mode enabled; waiting for upload to finish before next download")
@@ -1347,6 +1503,9 @@ class QueueManager:
         
         logger.info(f"Executing grouped upload for {filename}: {len(existing_files)} files")
         
+        # Check for WebDAV quiet mode
+        webdav_quiet_mode = task.get('webdav_quiet_mode', False)
+        
         # Validate against Telegram's album limit
         if len(existing_files) > TELEGRAM_ALBUM_MAX_FILES:
             logger.warning(f"⚠️ Grouped upload has {len(existing_files)} files, exceeds Telegram limit of {TELEGRAM_ALBUM_MAX_FILES}")
@@ -1362,16 +1521,17 @@ class QueueManager:
             telegram_ops = TelegramOperations(client)
             cache_manager = CacheManager()
             
-            # Notify start of upload
+            # Notify start of upload (suppress for WebDAV quiet mode)
             upload_msg = None
-            if event and hasattr(event, 'reply') and callable(getattr(event, 'reply')):
+            if not webdav_quiet_mode and event and hasattr(event, 'reply') and callable(getattr(event, 'reply')):
                 try:
                     upload_msg = await event.reply(f'📤 Uploading {len(existing_files)} {media_type}...')
                 except Exception as e:
                     logger.warning(f"Failed to send upload notification: {e}")
                     upload_msg = None
             else:
-                logger.info(f"📤 Uploading {len(existing_files)} {media_type}... (background task)")
+                mode = "quiet mode" if webdav_quiet_mode else "background task"
+                logger.info(f"📤 Uploading {len(existing_files)} {media_type}... ({mode})")
             
             # Get target entity
             target = await ensure_target_entity(client)

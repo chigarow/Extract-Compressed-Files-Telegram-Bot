@@ -637,10 +637,18 @@ async def test_integration_webdav_full_workflow(tmp_path, monkeypatch):
     # Verify all downloads processed
     assert download_count == 5, f"Should process 5 downloads, got {download_count}"
     
-    # Verify 5 upload tasks were queued
-    assert queue_manager.upload_queue.qsize() == 5, f"Should queue 5 upload tasks, got {queue_manager.upload_queue.qsize()}"
+    # NEW BEHAVIOR: With album batching, 5 files are grouped into 1 grouped upload task
+    assert queue_manager.upload_queue.qsize() == 1, f"Should queue 1 grouped upload task, got {queue_manager.upload_queue.qsize()}"
     
-    print("✅ Integration test passed: Full WebDAV workflow completed successfully")
+    # Verify the grouped task has correct metadata
+    upload_task = list(queue_manager.upload_queue)[0]
+    assert upload_task['type'] == 'grouped_media', "Should be a grouped media task"
+    assert upload_task['is_grouped'] is True, "Task should be marked as grouped"
+    assert upload_task['webdav_quiet_mode'] is True, "Should have quiet mode enabled"
+    assert len(upload_task['file_paths']) == 5, "Should contain all 5 files in the album"
+    assert upload_task['source_webdav'] == 'TestFolder', "Should reference the source folder"
+    
+    print("✅ Integration test passed: Full WebDAV workflow completed successfully with album batching")
 
 
 if __name__ == '__main__':

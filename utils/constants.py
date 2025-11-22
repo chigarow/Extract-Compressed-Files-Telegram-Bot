@@ -95,3 +95,8 @@ WEBDAV_SEQUENTIAL_MODE = _env_bool('WEBDAV_SEQUENTIAL_MODE', True)
 MAX_RETRY_ATTEMPTS = 5        # Maximum retry attempts per operation
 RETRY_BASE_INTERVAL = 5       # Base interval for exponential backoff (seconds)
 RETRY_QUEUE_FILE = os.path.join(DATA_DIR, 'retry_queue.json')
+
+# Deferred video conversion configuration
+CONVERSION_STATE_FILE = os.path.join(DATA_DIR, 'conversion_state.json')
+CONVERSION_MAX_RETRIES = int(os.environ.get('CONVERSION_MAX_RETRIES', 3))
+CONVERSION_STATE_SAVE_INTERVAL = int(os.environ.get('CONVERSION_STATE_SAVE_INTERVAL', 10))

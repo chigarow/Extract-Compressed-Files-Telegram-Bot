@@ -32,6 +32,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **[Network Monitoring](.documentation_feature/network-monitoring.md)**: WiFi-only mode with intelligent network detection for mobile data conservation.
 - **[Battery Monitoring](.documentation_feature/battery-monitoring.md)**: Built-in battery status monitoring for Termux users.
 - **[Compression Timeout Control](.documentation_feature/compression-timeout-control.md)**: Configurable timeout settings for video compression operations.
+- **[Deferred Video Conversion](.documentation_feature/deferred-video-conversion.md)**: **NEW: Prevents video conversion from blocking normal uploads by deferring incompatible video conversions until after all images and compatible videos have been uploaded.** Includes crash-resilient state management with automatic resume capability. No more timeout errors blocking your uploads!
 - **[System Resource Monitoring](.documentation_feature/system-resource-monitoring.md)**: Real-time CPU, memory, and disk usage tracking.
 - **[Sender Validation & Security](.documentation_feature/sender-validation-security.md)**: **NEW: Only processes messages from the configured `account_b_username`, preventing unauthorized access.** All messages from other users are blocked and logged for security auditing. This ensures that only your designated target user can trigger downloads, uploads, and commands.
 - **[Automatic File Cleanup](.documentation_feature/automatic-file-cleanup.md)**: **NEW: Manual cleanup commands to remove old files and orphaned directories, recovering disk space.** Includes safety confirmations and protected file lists. See [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md) for details.
@@ -585,6 +586,65 @@ WIFI_ONLY_MODE=true
 - `⏸️ Download paused: Mobile data detected`
 - `⏳ Waiting for WiFi connection...`
 - `▶️ Download resumed: WiFi connection established`
+
+### Deferred Video Conversion ✨ **NEW**
+
+The bot now includes **intelligent deferred video conversion** that prevents video conversion timeouts from blocking normal uploads:
+
+**How It Works:**
+When files are queued for upload, the bot automatically:
+1. **Detects incompatible videos** that need conversion (e.g., .mov, .avi files)
+2. **Defers conversion** to the end of the queue
+3. **Uploads normal files first** (images and compatible videos proceed immediately)
+4. **Converts videos after** all normal uploads complete
+5. **Saves conversion state** every 10 seconds for crash recovery
+6. **Resumes automatically** after crashes or restarts
+
+**Benefits:**
+- ✅ **No Upload Blocking**: Images and compatible videos upload immediately
+- ✅ **Crash Resilient**: Conversions resume from last checkpoint after interruptions
+- ✅ **Better UX**: Users see their files immediately, conversions happen in background
+- ✅ **Resource Efficient**: Optimal for low-resource devices (Termux/Android)
+
+**Example Workflow:**
+```
+User: Sends archive with 100 images + 5 incompatible videos
+Bot: "📦 Extracting archive.zip..."
+Bot: "📤 Uploading 100 images as album..."
+Bot: "✅ Uploaded 100 images"
+Bot: "⏸️ Deferred video conversion: video1.mov"
+Bot: "⏸️ Deferred video conversion: video2.mov"
+...
+[After all normal uploads complete]
+Bot: "🎬 Starting deferred conversion: video1.mov"
+Bot: "💾 Conversion state saved: video1.mov (45% complete)"
+Bot: "✅ Conversion completed: video1.mov -> video1_converted.mp4"
+Bot: "✅ Uploaded video1_converted.mp4"
+```
+
+**Crash Recovery:**
+```
+[Bot crashes during conversion at 45%]
+[User restarts bot]
+Bot: "🔄 Found 1 incomplete conversion"
+Bot: "♻️ Queued recovery conversion: video1.mov"
+Bot: "♻️ Resumed conversion after crash: video1.mov (from 45%)"
+Bot: "✅ Conversion completed: video1.mov"
+```
+
+**Configuration:**
+```ini
+# secrets.properties
+DEFERRED_VIDEO_CONVERSION=true  # Enable feature (default: true)
+CONVERSION_MAX_RETRIES=3  # Max retry attempts (default: 3)
+CONVERSION_TIMEOUT_SECONDS=1800  # 30 minutes for large files
+```
+
+**State Management:**
+- Conversion progress saved to `data/conversion_state.json`
+- Automatic cleanup of old completed conversions (24 hours)
+- Retry logic with configurable max attempts
+- Quarantine directory for failed conversions
 
 ### Video Compression Timeout Control
 

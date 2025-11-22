@@ -60,6 +60,8 @@ class Config:
         self.webdav_enabled = self._getboolean('WEBDAV_ENABLED', True)
         # WebDAV chunk size for downloads/uploads (KB) - reduces memory usage on low-resource devices
         self.webdav_chunk_size_kb = self._getint('WEBDAV_CHUNK_SIZE_KB', 1024)
+        # WebDAV request timeout (seconds) for listing and file transfers
+        self.webdav_timeout_seconds = self._getint('WEBDAV_TIMEOUT_SECONDS', 120)
 
     def _get(self, key, fallback=None):
         return self._config.get('DEFAULT', key, fallback=fallback)

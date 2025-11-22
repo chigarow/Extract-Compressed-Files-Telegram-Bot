@@ -119,7 +119,7 @@ class TorboxWebDAVClient:
         username: str,
         password: str,
         *,
-        timeout: int = 120,
+        timeout: Optional[int] = None,
         chunk_size: Optional[int] = None,
     ):
         if not username or not password:
@@ -134,6 +134,12 @@ class TorboxWebDAVClient:
         self.base_url = base_url.rstrip('/') or 'https://webdav.torbox.app'
         self.username = username
         self.password = password
+        if timeout is None:
+            try:
+                from config import config as global_config
+                timeout = getattr(global_config, 'webdav_timeout_seconds', 120)
+            except Exception:
+                timeout = 120
         self.timeout = timeout
         # Use provided chunk_size or default from config (converted to bytes)
         if chunk_size is None:
@@ -143,7 +149,8 @@ class TorboxWebDAVClient:
 
         self._sync_client = SyncWebDAVClient(
             base_url=self.base_url,
-            auth=(self.username, self.password)
+            auth=(self.username, self.password),
+            timeout=self.timeout,
         )
         self._http_client: Optional[httpx.AsyncClient] = None
         self._http_lock = asyncio.Lock()
@@ -165,7 +172,27 @@ class TorboxWebDAVClient:
                 detail=True
             )
 
-        entries = await asyncio.to_thread(_list)
+        entries = None
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 4):
+            try:
+                entries = await asyncio.to_thread(_list)
+                break
+            except Exception as exc:
+                last_exc = exc
+                if self._is_timeout_error(exc) and attempt < 3:
+                    delay = 5 * attempt
+                    logger.warning(
+                        f"WebDAV list attempt {attempt} timed out for {normalized}: {exc}. Retrying in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+        if entries is None:
+            # All retries failed; raise the last exception
+            raise last_exc or RuntimeError("WebDAV listing failed without an explicit exception")
+
         items: List[WebDAVItem] = []
         for entry in entries:
             name = (entry.get('name') or '').lstrip('/')
@@ -301,6 +328,15 @@ class TorboxWebDAVClient:
             return f"{self.base_url}/{encoded}"
         return f"{self.base_url}/"
 
+    def _is_timeout_error(self, exc: Exception) -> bool:
+        """Return True if the exception represents a timeout."""
+        timeout_types = []
+        timeout_exc = getattr(httpx, 'TimeoutException', None)
+        if isinstance(timeout_exc, type):
+            timeout_types.append(timeout_exc)
+        timeout_types_tuple = tuple(timeout_types) + (asyncio.TimeoutError, TimeoutError)
+        return isinstance(exc, timeout_types_tuple) or 'timed out' in str(exc).lower()
+
     @staticmethod
     def _get_total_size(response: httpx.Response, resume_from: int) -> Optional[int]:
         if 'content-range' in response.headers:
@@ -338,6 +374,7 @@ async def get_webdav_client() -> TorboxWebDAVClient:
                 base_url=getattr(config, 'webdav_base_url', 'https://webdav.torbox.app'),
                 username=getattr(config, 'webdav_username', ''),
                 password=getattr(config, 'webdav_password', ''),
+                timeout=getattr(config, 'webdav_timeout_seconds', 120),
             )
         return _client_instance
 

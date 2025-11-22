@@ -137,6 +137,8 @@ class TestWebDAVUploadProcessorContinuity:
     """Test that upload processor continues after errors."""
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(15)
+    @pytest.mark.slow
     async def test_processor_continues_after_exception(self, queue_manager):
         """Test that processor continues to next task after an exception."""
         # Add multiple upload tasks
@@ -186,6 +188,8 @@ class TestWebDAVUploadProcessorContinuity:
         assert queue_manager.upload_queue.qsize() == 0, "Upload queue should be empty"
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(15)
+    @pytest.mark.slow
     async def test_processor_continues_after_flood_wait(self, queue_manager):
         """Test that processor continues after FloodWaitError."""
         # Add multiple upload tasks
@@ -333,6 +337,8 @@ class TestEnhancedLogging:
     """Test that enhanced logging works correctly."""
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(15)
+    @pytest.mark.slow
     async def test_queue_size_logged_after_error(self, queue_manager, caplog):
         """Test that queue size is logged after errors."""
         import logging
@@ -526,8 +532,10 @@ class TestQueueContinuity:
     """Test that queue processing is continuous."""
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(20)
+    @pytest.mark.slow
     async def test_all_tasks_processed_despite_errors(self, queue_manager):
-        """Test that all tasks are processed even when some fail."""
+        """Test that all tasks are processed even if some fail."""
         # Add 10 tasks
         task_count = 10
         for i in range(task_count):
@@ -572,6 +580,8 @@ class TestQueueContinuity:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.integration
 async def test_integration_webdav_full_workflow(tmp_path, monkeypatch):
     """Integration test: Full WebDAV workflow from discovery to upload."""
     from utils.webdav_client import WebDAVItem

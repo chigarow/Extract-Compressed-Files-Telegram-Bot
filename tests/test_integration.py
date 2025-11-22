@@ -36,6 +36,8 @@ class TestRealQueueProcessing:
         return QueueManager()
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    @pytest.mark.integration
     async def test_full_download_queue_workflow(self, queue_manager, mock_telegram_client, temp_workspace):
         """Test complete download queue processing workflow"""
         temp_dir, data_dir = temp_workspace
@@ -103,6 +105,8 @@ class TestRealQueueProcessing:
                 queue_manager.download_queue.task_done()
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    @pytest.mark.integration
     async def test_retry_mechanism_with_failures(self, queue_manager, mock_telegram_client, temp_workspace):
         """Test retry mechanism with actual failures and recovery"""
         temp_dir, data_dir = temp_workspace
@@ -177,6 +181,8 @@ class TestRealQueueProcessing:
         print(f"📁 Final file size: {os.path.getsize(output_path)} bytes")
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(30)
+    @pytest.mark.integration
     async def test_concurrent_queue_processing(self, queue_manager, mock_telegram_client, temp_workspace):
         """Test concurrent processing with semaphore limits"""
         temp_dir, data_dir = temp_workspace
@@ -265,6 +271,8 @@ class TestErrorScenarios:
     """Test realistic error scenarios and recovery"""
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(20)
+    @pytest.mark.integration
     async def test_disk_full_simulation(self, tmp_path):
         """Test handling of disk full errors"""
         # Create a small limited space directory simulation
@@ -298,6 +306,8 @@ class TestErrorScenarios:
                 print("✅ Disk full error properly handled")
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(20)
+    @pytest.mark.integration
     async def test_network_timeout_recovery(self):
         """Test network timeout and recovery mechanisms"""
         
@@ -344,6 +354,7 @@ class TestErrorScenarios:
 class TestProcessManager:
     """Test ProcessManager with realistic scenarios"""
     
+    @pytest.mark.timeout(15)
     def test_process_state_persistence(self, tmp_path):
         """Test process state persistence across restarts"""
         

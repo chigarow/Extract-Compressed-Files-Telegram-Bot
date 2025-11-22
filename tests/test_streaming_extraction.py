@@ -164,6 +164,7 @@ async def test_streaming_batch_builder_dispatches_batches(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(10)  # Add explicit timeout to prevent hanging
 async def test_wait_for_upload_idle_tracks_active_uploads(monkeypatch):
     upload_started = asyncio.Event()
     upload_can_finish = asyncio.Event()
@@ -195,7 +196,12 @@ async def test_wait_for_upload_idle_tracks_active_uploads(monkeypatch):
     upload_can_finish.set()
     await wait_task
 
+    # Ensure cleanup of background tasks
     if queue_manager.upload_task:
         queue_manager.upload_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await queue_manager.upload_task
+    if queue_manager.download_task:
+        queue_manager.download_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await queue_manager.download_task

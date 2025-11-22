@@ -289,12 +289,8 @@ def mock_config():
     """Fixture providing mock configuration"""
     return create_mock_config()
 
-@pytest.fixture
-def event_loop():
-    """Fixture providing an event loop for async tests"""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
+# Removed event_loop fixture to avoid conflicts with pytest-asyncio auto mode
+# pytest-asyncio provides its own event loop management when using asyncio_mode = auto
 
 # Shared temp_dir fixture for tests that expect it in multiple classes
 @pytest.fixture

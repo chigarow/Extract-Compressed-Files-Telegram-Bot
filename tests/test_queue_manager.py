@@ -135,6 +135,8 @@ class TestQueueManager:
         await queue_manager.stop_processing()
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(15)
+    @pytest.mark.slow
     async def test_retry_mechanism(self, queue_manager, mock_document):
         """Test retry mechanism for failed tasks"""
         task_id = await queue_manager.add_download_task(mock_document, "/test/path")
@@ -164,6 +166,8 @@ class TestQueueManager:
         assert completed_task is None or completed_task['status'] == 'completed'
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(15)
+    @pytest.mark.slow
     async def test_max_retry_attempts(self, queue_manager, mock_document):
         """Test that tasks are moved to failed after max retries"""
         task_id = await queue_manager.add_download_task(mock_document, "/test/path")
@@ -329,6 +333,8 @@ class TestQueueManagerIntegration:
     """Integration tests for QueueManager"""
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(15)
+    @pytest.mark.slow
     async def test_full_download_workflow(self, mock_client, file_manager, mock_document):
         """Test complete download workflow from queue to completion"""
         temp_dir = file_manager.setup()

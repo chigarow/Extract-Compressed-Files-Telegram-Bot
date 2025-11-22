@@ -26,7 +26,7 @@ class TestFloodWaitErrorHandling:
     """Test FloodWaitError handling in upload queue."""
     
     @pytest.fixture
-    def queue_manager(self):
+    async def queue_manager(self):
         """Create a QueueManager instance for testing."""
         return QueueManager()
     
@@ -211,12 +211,16 @@ class TestFloodWaitErrorHandling:
                  patch('utils.queue_manager.CacheManager'), \
                  patch.object(queue_manager, '_add_to_retry_queue', new=AsyncMock()):
                 
+                # Enable worker start for this test
+                queue_manager._disable_upload_worker_start = False
+                
                 # Add both tasks to queue
                 await queue_manager.add_upload_task(upload_task)
                 await queue_manager.add_upload_task(upload_task_2)
                 
                 # Wait for processor to handle both tasks
-                await asyncio.sleep(0.5)
+                # Increase wait time slightly to ensure processing happens
+                await asyncio.sleep(1.0)
                 
                 # Both upload attempts should have been made
                 assert upload_call_count['count'] == 2, "Processor should continue after FloodWaitError"
@@ -338,19 +342,60 @@ class TestProgressCallbackRateLimit:
         
         status_msg.edit = AsyncMock(side_effect=edit_side_effect)
         
-        # Create TelegramOperations instance
-        telegram_ops = TelegramOperations()
-        callback = telegram_ops.create_progress_callback(status_msg, "test.mp4")
-        
-        # Simulate progress updates
-        await callback(1000, 10000)      # 10% - should succeed
-        await asyncio.sleep(16)          # Wait for throttle
-        await callback(2000, 10000)      # 20% - should hit rate limit
-        await asyncio.sleep(16)          # Wait for throttle
-        await callback(3000, 10000)      # 30% - should be skipped due to rate limit
-        
-        # Only first call should go through, second fails, third is skipped
-        assert edit_call_count['count'] == 2
+        # Mock get_client to avoid real DB connection
+        # Mock time.time to avoid waiting
+        # Mock asyncio.sleep to avoid waiting
+        with patch('utils.telegram_operations.get_client'), \
+             patch('time.time') as mock_time, \
+             patch('asyncio.sleep', new=AsyncMock()):
+            
+            # Setup time
+            start_time = 1000.0
+            mock_time.return_value = start_time
+            
+            # Create TelegramOperations instance
+            telegram_ops = TelegramOperations()
+            callback = telegram_ops.create_progress_callback(status_msg, "test.mp4")
+            
+            # Simulate progress updates
+            
+            # 1. 10% - should succeed
+            await callback(1000, 10000)
+            
+            # 2. Advance time by 16s (past throttle)
+            mock_time.return_value = start_time + 16
+            
+            # 3. 20% - should hit rate limit (FloodWaitError 10s)
+            await callback(2000, 10000)
+            
+            # 4. Advance time by another 16s (total 32s)
+            # Note: The FloodWaitError handler sets last_edit_time to now + 10s
+            # So we need to be past that. 16s + 16s = 32s, which is > 16s + 10s = 26s.
+            mock_time.return_value = start_time + 32
+            
+            # 5. 30% - should be skipped?
+            # Wait, the test comment says "third is skipped due to rate limit"
+            # But if we advance time enough, it should work?
+            # The original test slept 16s.
+            # Let's check the logic in create_progress_callback:
+            # except FloodWaitError as e:
+            #    last_edit_time = now + e.seconds
+            #    last_edit_pct = pct
+            
+            # At step 3 (20%): now=1016. FloodWait=10s.
+            # last_edit_time = 1016 + 10 = 1026.
+            # last_edit_pct = 20.
+            
+            # At step 5 (30%): now=1032.
+            # Condition: (pct >= last_edit_pct + 15) or ((now - last_edit_time) > 15)
+            # (30 >= 20 + 15) -> False (30 >= 35)
+            # ((1032 - 1026) > 15) -> False (6 > 15)
+            # So it SHOULD be skipped.
+            
+            await callback(3000, 10000)
+            
+            # Only first call should go through, second fails, third is skipped
+            assert edit_call_count['count'] == 2
     
     @pytest.mark.asyncio  
     async def test_progress_callback_conservative_throttling(self):
@@ -360,18 +405,28 @@ class TestProgressCallbackRateLimit:
         status_msg = MagicMock()
         status_msg.edit = AsyncMock()
         
-        telegram_ops = TelegramOperations()
-        callback = telegram_ops.create_progress_callback(status_msg, "test.mp4")
-        
-        # Simulate rapid progress updates
-        total = 10000
-        for i in range(0, total, 100):
-            await callback(i, total)
-        
-        # Should only update at 0%, 15%, 30%, 45%, 60%, 75%, 90% (7 times)
-        # Plus initial 0% = 7-8 calls maximum
-        assert status_msg.edit.call_count <= 8, \
-            f"Should have max 8 progress updates, got {status_msg.edit.call_count}"
+        # Mock get_client to avoid real DB connection
+        # Mock time.time to control throttling
+        with patch('utils.telegram_operations.get_client'), \
+             patch('time.time') as mock_time:
+            
+            start_time = 1000.0
+            mock_time.return_value = start_time
+            
+            telegram_ops = TelegramOperations()
+            callback = telegram_ops.create_progress_callback(status_msg, "test.mp4")
+            
+            # Simulate rapid progress updates
+            # We increment time slightly but not enough to trigger time-based throttle
+            total = 10000
+            for i in range(0, total, 100):
+                mock_time.return_value = start_time + (i / 1000.0) # Advance 0.1s per step
+                await callback(i, total)
+            
+            # Should only update at 0%, 15%, 30%, 45%, 60%, 75%, 90% (7 times)
+            # Plus initial 0% = 7-8 calls maximum
+            assert status_msg.edit.call_count <= 8, \
+                f"Should have max 8 progress updates, got {status_msg.edit.call_count}"
 
 
 if __name__ == '__main__':

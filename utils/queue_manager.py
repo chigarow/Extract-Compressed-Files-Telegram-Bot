@@ -1241,30 +1241,68 @@ class QueueManager:
             await self._wait_for_upload_idle()
 
     async def _handle_webdav_download_failure(self, task: dict, event, error: Exception, live_event: bool):
-        """Handle retries for failed WebDAV downloads."""
+        """Handle retries for failed WebDAV downloads with smart backoff for network errors."""
 
         filename = task.get('filename', 'webdav_file')
         retry_count = task.get('retry_count', 0) + 1
+        
+        # Detect error type for better retry strategy
+        error_msg = str(error).lower()
+        is_dns_error = 'no address associated' in error_msg or 'errno 7' in error_msg
+        is_network_error = any(keyword in error_msg for keyword in [
+            'connection refused', 'connection reset', 'network is unreachable',
+            'errno 61', 'errno 54', 'errno 104'
+        ])
+        is_timeout = 'timeout' in error_msg or 'timed out' in error_msg
+        
+        # Classify error for logging
+        if is_dns_error:
+            error_type = "DNS resolution failure"
+        elif is_network_error:
+            error_type = "network connection error"
+        elif is_timeout:
+            error_type = "timeout/stall"
+        else:
+            error_type = "unknown error"
+        
         if retry_count <= MAX_RETRY_ATTEMPTS:
-            retry_delay = RETRY_BASE_INTERVAL * (2 ** (retry_count - 1))
-            logger.info(f"Scheduling WebDAV retry {retry_count} for {filename} in {retry_delay}s")
+            # Use exponential backoff for network/DNS errors, linear for others
+            if is_dns_error or is_network_error:
+                # DNS/network errors: longer delays with exponential backoff
+                retry_delay = min(RETRY_BASE_INTERVAL * (2 ** retry_count), 300)  # Cap at 5 minutes
+                logger.info(
+                    f"Scheduling WebDAV retry {retry_count} for {filename} in {retry_delay}s "
+                    f"(reason: {error_type})"
+                )
+            else:
+                # Timeouts/stalls: standard exponential backoff
+                retry_delay = RETRY_BASE_INTERVAL * (2 ** (retry_count - 1))
+                logger.info(
+                    f"Scheduling WebDAV retry {retry_count} for {filename} in {retry_delay}s "
+                    f"(reason: {error_type})"
+                )
+            
             retry_task = task.copy()
             retry_task['retry_count'] = retry_count
             retry_task['retry_after'] = time.time() + retry_delay
             await self._add_to_retry_queue(retry_task)
+            
             if live_event:
                 try:
                     await event.reply(
-                        f'⚠️ WebDAV download failed for {filename}. Retrying in {retry_delay}s '
-                        f'(attempt {retry_count}/{MAX_RETRY_ATTEMPTS}).'
+                        f'⚠️ WebDAV download failed for {filename} ({error_type}). '
+                        f'Retrying in {retry_delay}s (attempt {retry_count}/{MAX_RETRY_ATTEMPTS}).'
                     )
                 except Exception as reply_error:
                     logger.debug(f"Failed to send retry notification: {reply_error}")
         else:
-            logger.error(f"WebDAV download permanently failed for {filename}: {error}")
+            logger.error(f"WebDAV download permanently failed for {filename} ({error_type}): {error}")
             if live_event:
                 try:
-                    await event.reply(f'❌ WebDAV download failed for {filename} after {MAX_RETRY_ATTEMPTS} attempts.')
+                    await event.reply(
+                        f'❌ WebDAV download failed for {filename} ({error_type}) '
+                        f'after {MAX_RETRY_ATTEMPTS} attempts.'
+                    )
                 except Exception as reply_error:
                     logger.debug(f"Failed to send permanent failure notification: {reply_error}")
 

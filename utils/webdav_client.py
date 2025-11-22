@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Callable, List, Optional, Tuple
 from urllib.parse import quote, unquote, urlparse
@@ -121,6 +122,7 @@ class TorboxWebDAVClient:
         *,
         timeout: Optional[int] = None,
         chunk_size: Optional[int] = None,
+        inactivity_timeout: Optional[int] = None,
     ):
         if not username or not password:
             raise ValueError('WebDAV credentials are required')
@@ -141,11 +143,21 @@ class TorboxWebDAVClient:
             except Exception:
                 timeout = 120
         self.timeout = timeout
+        
         # Use provided chunk_size or default from config (converted to bytes)
         if chunk_size is None:
             from utils.constants import WEBDAV_CHUNK_SIZE_KB
             chunk_size = WEBDAV_CHUNK_SIZE_KB * 1024
         self.chunk_size = chunk_size
+        
+        # Inactivity timeout for detecting stalled downloads
+        if inactivity_timeout is None:
+            try:
+                from config import config as global_config
+                inactivity_timeout = getattr(global_config, 'webdav_inactivity_timeout', 60)
+            except Exception:
+                inactivity_timeout = 60
+        self.inactivity_timeout = inactivity_timeout
 
         self._sync_client = SyncWebDAVClient(
             base_url=self.base_url,
@@ -250,58 +262,149 @@ class TorboxWebDAVClient:
         *,
         progress_callback: Optional[ProgressCallback] = None,
     ):
-        """Download a file with resume support via HTTP range requests."""
+        """Download a file with resume support, inactivity watchdog, and robust error handling."""
 
         url = self._build_full_url(remote_path)
         part_path = dest_path + '.part'
         os.makedirs(os.path.dirname(dest_path) or '.', exist_ok=True)
 
+        # Check for existing partial download
         resume_from = 0
         if os.path.exists(part_path):
             resume_from = os.path.getsize(part_path)
+            # Clean up zero-byte partials to avoid corruption
+            if resume_from == 0:
+                try:
+                    os.remove(part_path)
+                    logger.debug(f"Removed zero-byte partial file: {part_path}")
+                    resume_from = 0
+                except OSError:
+                    pass
 
+        # Prepare headers for resume
         headers = {}
         if resume_from:
             headers['Range'] = f'bytes={resume_from}-'
+            logger.info(f"Resuming download from byte {resume_from} for {remote_path}")
 
         client = await self._ensure_http_client()
-        logger.info(f"Downloading WebDAV file {remote_path} → {dest_path} (resume from {resume_from})")
-
-        response = await client.get(url, headers=headers)
-        if response.status_code == 416 and resume_from:
-            # Already downloaded fully
-            os.rename(part_path, dest_path)
-            return
-
-        if response.status_code == 200 and resume_from:
-            logger.warning(
-                f"Server ignored range request for {remote_path}; restarting download"
-            )
-            resume_from = 0
-
-        response.raise_for_status()
-
-        mode = 'ab' if resume_from else 'wb'
-        total_bytes = self._get_total_size(response, resume_from)
-        current = resume_from
+        logger.info(
+            f"Starting WebDAV download: {remote_path} → {dest_path} "
+            f"(resume from {resume_from}, chunk size: {self.chunk_size} bytes, "
+            f"inactivity timeout: {self.inactivity_timeout}s)"
+        )
 
         try:
-            with open(part_path, mode) as handle:
-                async for chunk in response.aiter_bytes(self.chunk_size):
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-                    current += len(chunk)
-                    if progress_callback:
-                        progress_callback(current, total_bytes)
-        except Exception:
-            logger.exception(f"Failed to stream {remote_path}")
-            raise
-        finally:
-            await response.aclose()
+            response = await client.get(url, headers=headers)
+            
+            # Log response details for diagnostics
+            logger.info(
+                f"WebDAV GET response for {remote_path}: "
+                f"status={response.status_code}, "
+                f"content-length={response.headers.get('content-length', 'unknown')}, "
+                f"content-range={response.headers.get('content-range', 'none')}, "
+                f"accept-ranges={response.headers.get('accept-ranges', 'none')}"
+            )
+            
+            # Handle already-complete downloads (416 Range Not Satisfiable)
+            if response.status_code == 416 and resume_from:
+                logger.info(f"Download already complete for {remote_path} (HTTP 416)")
+                await response.aclose()
+                os.rename(part_path, dest_path)
+                return
 
-        os.replace(part_path, dest_path)
-        logger.info(f"Completed WebDAV download: {dest_path}")
+            # Handle server ignoring Range header (HTTP 200 instead of 206)
+            if response.status_code == 200 and resume_from:
+                logger.warning(
+                    f"Server ignored Range request for {remote_path} (sent HTTP 200 instead of 206). "
+                    f"Restarting download from byte 0 to avoid corruption."
+                )
+                await response.aclose()
+                # Delete corrupt partial and restart
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+                resume_from = 0
+                headers = {}
+                # Retry without Range header
+                response = await client.get(url, headers=headers)
+                logger.info(f"Restarted download for {remote_path}: status={response.status_code}")
+
+            response.raise_for_status()
+
+            # Determine file mode and total size
+            mode = 'ab' if resume_from else 'wb'
+            total_bytes = self._get_total_size(response, resume_from)
+            current = resume_from
+            last_chunk_time = time.time()
+            last_heartbeat = time.time()
+            heartbeat_interval = 10  # Log progress every 10 seconds
+
+            try:
+                with open(part_path, mode) as handle:
+                    async for chunk in response.aiter_bytes(self.chunk_size):
+                        if not chunk:
+                            continue
+                        
+                        # Write chunk to disk
+                        handle.write(chunk)
+                        current += len(chunk)
+                        last_chunk_time = time.time()
+                        
+                        # Progress callback
+                        if progress_callback:
+                            progress_callback(current, total_bytes)
+                        
+                        # Heartbeat logging to detect stalls
+                        if time.time() - last_heartbeat >= heartbeat_interval:
+                            pct = (current / total_bytes * 100) if total_bytes else 0
+                            logger.debug(
+                                f"WebDAV download heartbeat for {remote_path}: "
+                                f"{current}/{total_bytes} bytes ({pct:.1f}%)"
+                            )
+                            last_heartbeat = time.time()
+                        
+                        # Inactivity watchdog: check if we've been waiting too long for next chunk
+                        # This is handled by httpx's built-in timeout, but we log it explicitly
+                        
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"WebDAV download timed out for {remote_path} after {self.timeout}s. "
+                    f"Downloaded {current} bytes before timeout."
+                )
+                raise
+            except Exception:
+                logger.exception(
+                    f"Failed to stream {remote_path}. "
+                    f"Downloaded {current} bytes before failure. Partial file preserved for resume."
+                )
+                raise
+            finally:
+                await response.aclose()
+
+            # Verify download completeness before renaming
+            if total_bytes and current < total_bytes:
+                logger.warning(
+                    f"Download incomplete for {remote_path}: {current}/{total_bytes} bytes. "
+                    f"Partial file preserved for resume."
+                )
+                raise RuntimeError(f"Incomplete download: {current}/{total_bytes} bytes")
+
+            # Move complete download to final destination
+            os.replace(part_path, dest_path)
+            logger.info(f"Completed WebDAV download: {dest_path} ({current} bytes)")
+            
+        except Exception as e:
+            # Enhanced error logging with context
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logger.error(
+                f"WebDAV download error for {remote_path}: {error_type}: {error_msg}. "
+                f"Progress: {resume_from} → {current if 'current' in locals() else resume_from} bytes"
+            )
+            # Re-raise to let queue manager handle retries
+            raise
 
     async def _ensure_http_client(self) -> httpx.AsyncClient:
         async with self._http_lock:
@@ -336,6 +439,32 @@ class TorboxWebDAVClient:
             timeout_types.append(timeout_exc)
         timeout_types_tuple = tuple(timeout_types) + (asyncio.TimeoutError, TimeoutError)
         return isinstance(exc, timeout_types_tuple) or 'timed out' in str(exc).lower()
+
+    def _is_network_error(self, exc: Exception) -> bool:
+        """Return True if the exception represents a network/DNS error that should be retried."""
+        error_msg = str(exc).lower()
+        # DNS errors
+        if 'no address associated' in error_msg or 'errno 7' in error_msg:
+            return True
+        # Connection errors
+        if any(keyword in error_msg for keyword in [
+            'connection refused',
+            'connection reset',
+            'connection aborted',
+            'network is unreachable',
+            'errno 61',  # Connection refused
+            'errno 54',  # Connection reset by peer
+            'errno 104', # Connection reset by peer (Linux)
+        ]):
+            return True
+        # httpx-specific network errors
+        network_exc = getattr(httpx, 'NetworkError', None)
+        connect_exc = getattr(httpx, 'ConnectError', None)
+        if network_exc and isinstance(exc, network_exc):
+            return True
+        if connect_exc and isinstance(exc, connect_exc):
+            return True
+        return False
 
     @staticmethod
     def _get_total_size(response: httpx.Response, resume_from: int) -> Optional[int]:

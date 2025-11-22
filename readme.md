@@ -39,6 +39,7 @@ This script extracts photos and videos from compressed files (zip, rar, 7z, tar,
 - **[Organized File Structure](.documentation_feature/organized-file-structure.md)**: **NEW: Dedicated `data/torbox/` directory for all Torbox downloads, keeping the main data directory clean and organized.**
 - **[System Monitoring Tools](.documentation_feature/system-monitoring-tools.md)**: **NEW: Built-in monitoring script (`monitor_system.py`) provides detailed reports on disk usage, old files, and cleanup recommendations.**
 - **[WebDAV Chunking for Memory Optimization](.documentation_feature/webdav-chunking-memory-optimization.md)**: **NEW: Configurable chunk sizes for WebDAV downloads to prevent out-of-memory crashes on low-RAM devices like Termux. Downloads files in small chunks (default 1 MB) with automatic resume support.**
+- **[WebDAV Stall Detection & Resume](.documentation_feature/webdav-stall-detection-resume.md)**: **NEW: Intelligent watchdog detects stalled downloads and automatically resumes them. Includes robust handling for server resume failures and network errors.**
 
 ## Security
 

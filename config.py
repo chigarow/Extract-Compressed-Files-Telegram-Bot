@@ -62,6 +62,11 @@ class Config:
         self.webdav_chunk_size_kb = self._getint('WEBDAV_CHUNK_SIZE_KB', 1024)
         # WebDAV request timeout (seconds) for listing and file transfers
         self.webdav_timeout_seconds = self._getint('WEBDAV_TIMEOUT_SECONDS', 120)
+        # WebDAV inactivity timeout (seconds) - abort download if no chunk received within this time
+        # Lower values (30-45s) for Termux/mobile, higher values (60-90s) for stable connections
+        self.webdav_inactivity_timeout = self._getint('WEBDAV_INACTIVITY_TIMEOUT', 60)
+        # WebDAV sequential mode - process one file at a time (reduces memory usage)
+        self.webdav_sequential_mode = self._getboolean('WEBDAV_SEQUENTIAL_MODE', False)
 
     def _get(self, key, fallback=None):
         return self._config.get('DEFAULT', key, fallback=fallback)

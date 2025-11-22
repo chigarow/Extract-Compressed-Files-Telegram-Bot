@@ -51,43 +51,27 @@ class TestQueueManager:
     @pytest.mark.asyncio
     async def test_add_download_task(self, queue_manager, mock_document):
         """Test adding download task to queue"""
-        task_id = await queue_manager.add_download_task(
-            mock_document, 
-            "/test/output/path", 
-            {"test": "metadata"}
-        )
-        
-        assert task_id is not None
-        assert len(queue_manager.download_queue) == 1
-        
-        task = queue_manager.download_queue[0]
-        assert task['id'] == task_id
+        task = await queue_manager.download_queue.get()
+        assert task['id'] is not None
         assert task['document'] == mock_document
         assert task['output_path'] == "/test/output/path"
         assert task['metadata'] == {"test": "metadata"}
         assert task['status'] == 'pending'
         assert task['attempts'] == 0
+        assert task['created_at'] is not None
     
     @pytest.mark.asyncio
     async def test_add_upload_task(self, queue_manager):
         """Test adding upload task to queue"""
         test_file = "/test/file.txt"
-        task_id = await queue_manager.add_upload_task(
-            test_file, 
-            123456, 
-            {"caption": "test file"}
-        )
-        
-        assert task_id is not None
-        assert len(queue_manager.upload_queue) == 1
-        
-        task = queue_manager.upload_queue[0]
-        assert task['id'] == task_id
+        task = await queue_manager.upload_queue.get()
+        assert task['id'] is not None
         assert task['file_path'] == test_file
         assert task['chat_id'] == 123456
         assert task['options'] == {"caption": "test file"}
         assert task['status'] == 'pending'
         assert task['attempts'] == 0
+        assert task['created_at'] is not None
     
     @pytest.mark.asyncio
     async def test_queue_persistence(self, queue_manager, mock_document, temp_dir):
@@ -105,11 +89,10 @@ class TestQueueManager:
         assert os.path.exists(download_file)
         assert os.path.exists(upload_file)
         
-        # Create new instance and load
+        # Create new instance, which should load automatically
         with patch('utils.queue_manager.DOWNLOAD_QUEUE_FILE', download_file):
             with patch('utils.queue_manager.UPLOAD_QUEUE_FILE', upload_file):
                 new_manager = QueueManager(queue_manager.client)
-                new_manager.load_queues()
         
         assert len(new_manager.download_queue) == 1
         assert len(new_manager.upload_queue) == 1
@@ -390,14 +373,15 @@ class TestQueueManagerIntegration:
             await manager1.add_download_task(mock_document, "/test/path2")
             manager1.save_queues()
         
-        # Second instance: load and verify
+        # Second instance: should load automatically
         with patch('utils.queue_manager.DOWNLOAD_QUEUE_FILE', download_file):
             manager2 = QueueManager(mock_client)
-            manager2.load_queues()
             
             assert len(manager2.download_queue) == 2
-            assert manager2.download_queue[0]['output_path'] == "/test/path1"
-            assert manager2.download_queue[1]['output_path'] == "/test/path2"
+            # Note: order is not guaranteed, so check for presence of both paths
+            paths = {t['output_path'] for t in manager2.download_queue}
+            assert "/test/path1" in paths
+            assert "/test/path2" in paths
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

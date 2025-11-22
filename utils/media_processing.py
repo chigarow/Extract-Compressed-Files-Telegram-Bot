@@ -16,6 +16,8 @@ logger = logging.getLogger('extractor')
 
 # Telegram's 10MB photo upload limit (in bytes)
 TELEGRAM_PHOTO_SIZE_LIMIT = 10 * 1024 * 1024  # 10MB
+# Conservative list of extensions that typically work with Telegram albums
+COMPATIBLE_VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.mov', '.m4v', '.webm', '.ts'}
 
 
 def is_ffmpeg_available():
@@ -61,14 +63,23 @@ def validate_video_file(file_path: str) -> dict:
         return {}
 
 
+def _is_extension_compatible(file_path: str) -> bool:
+    """Fast extension-only compatibility check for album uploads."""
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in COMPATIBLE_VIDEO_EXTENSIONS
+
+
 def is_telegram_compatible_video(file_path: str) -> bool:
     """
     Check if a video is already compatible with Telegram's requirements.
     Returns True if the video is compatible with Telegram, False otherwise.
     """
+    # Quick extension-based check as a fallback when ffprobe is unavailable
     if not is_ffprobe_available():
-        logger.warning("ffprobe not found, assuming video is not Telegram compatible")
-        return False
+        ext_ok = _is_extension_compatible(file_path)
+        if not ext_ok:
+            logger.warning("ffprobe not found, assuming video is not Telegram compatible")
+        return ext_ok
     
     try:
         # Check if file is MP4 container with H.264 codec
@@ -99,13 +110,13 @@ def is_telegram_compatible_video(file_path: str) -> bool:
                     return False
             else:
                 logger.warning(f"Could not parse ffprobe output for {file_path}")
-                return False
+                return _is_extension_compatible(file_path)
         else:
-            logger.warning(f"ffprobe failed for {file_path}, assuming video is not Telegram compatible")
-            return False
+            logger.warning(f"ffprobe failed for {file_path}, falling back to extension check")
+            return _is_extension_compatible(file_path)
     except Exception as e:
         logger.error(f"Error checking if video is Telegram compatible: {e}")
-        return False
+        return _is_extension_compatible(file_path)
 
 
 def needs_video_processing(file_path: str) -> bool:

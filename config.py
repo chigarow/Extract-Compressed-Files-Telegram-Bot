@@ -46,6 +46,8 @@ class Config:
         self.fast_download_enabled = self._getboolean('FAST_DOWNLOAD_ENABLED', True)
         self.fast_download_connections = self._getint('FAST_DOWNLOAD_CONNECTIONS', 8)
         self.wifi_only_mode = self._getboolean('WIFI_ONLY_MODE', True)
+        # Control deferred conversion of incompatible grouped videos
+        self.deferred_video_conversion = self._getboolean('DEFERRED_VIDEO_CONVERSION', True)
         # Video compression timeout (seconds). Default 300 (5 minutes)
         # Can be overridden in secrets.properties via COMPRESSION_TIMEOUT_SECONDS
         self.compression_timeout_seconds = self._getint('COMPRESSION_TIMEOUT_SECONDS', 300)

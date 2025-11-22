@@ -45,6 +45,7 @@ TRANSCODE_ENABLED = config.transcode_enabled
 FAST_DOWNLOAD_ENABLED = config.fast_download_enabled
 FAST_DOWNLOAD_CONNECTIONS = config.fast_download_connections
 WIFI_ONLY_MODE = config.wifi_only_mode
+DEFERRED_VIDEO_CONVERSION = getattr(config, 'deferred_video_conversion', True)
 COMPRESSION_TIMEOUT_SECONDS = getattr(config, 'compression_timeout_seconds', 300)
 WEBDAV_CHUNK_SIZE_KB = config.webdav_chunk_size_kb
 

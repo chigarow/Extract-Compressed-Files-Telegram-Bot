@@ -125,6 +125,12 @@ class TorboxWebDAVClient:
         if not username or not password:
             raise ValueError('WebDAV credentials are required')
 
+        # Ensure an event loop exists for constructing async primitives in sync contexts
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
         self.base_url = base_url.rstrip('/') or 'https://webdav.torbox.app'
         self.username = username
         self.password = password

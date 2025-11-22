@@ -50,13 +50,20 @@ class MockTelegramClient:
         """Mock download that creates a test file"""
         if file:
             # Create test content
-            content = SAMPLE_FILES.get("test.txt", b"Mock file content")
+            if hasattr(message, 'size') and isinstance(getattr(message, 'size'), int) and message.size > 0:
+                content = b'x' * message.size
+            else:
+                content = SAMPLE_FILES.get("test.txt", b"Mock file content")
             if isinstance(file, str):
                 with open(file, 'wb') as f:
                     f.write(content)
+                if progress_callback:
+                    progress_callback(len(content), len(content))
                 return file
             else:
                 file.write(content)
+                if progress_callback:
+                    progress_callback(len(content), len(content))
                 return file
         return b"Mock file content"
         
@@ -299,3 +306,17 @@ def temp_dir():
         yield d
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+@pytest.fixture
+def temp_workspace(tmp_path):
+    """Provide workspace/data directories for integration-style tests."""
+    temp_dir = tmp_path / "workspace"
+    data_dir = temp_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    yield (str(temp_dir), str(data_dir))
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+@pytest.fixture
+def mock_telegram_client(mock_client):
+    """Alias for compatibility with integration tests expecting mock_telegram_client."""
+    return mock_client

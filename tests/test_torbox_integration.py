@@ -221,15 +221,10 @@ class TestTorboxDownload:
                 yield b'test data chunk 1'
                 yield b'test data chunk 2'
             
-            mock_response.content.iter_chunked = lambda size: mock_chunks()
-            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-            mock_response.__aexit__ = AsyncMock(return_value=None)
-            
-            # Mock the session
+            mock_response.content.iter_chunked = mock_chunks
+
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
@@ -258,9 +253,7 @@ class TestTorboxDownload:
             mock_response.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
@@ -301,9 +294,7 @@ class TestTorboxDownload:
             mock_response.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
@@ -341,9 +332,7 @@ class TestTorboxDownload:
             mock_response.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
@@ -497,9 +486,7 @@ class TestSDKIntegration:
             mock_response.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
@@ -543,9 +530,7 @@ class TestSDKIntegration:
             mock_response.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
@@ -585,9 +570,7 @@ class TestSDKIntegration:
             mock_response.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
@@ -641,9 +624,7 @@ class TestSDKIntegration:
             mock_response.__aexit__ = AsyncMock(return_value=None)
             
             mock_session = AsyncMock()
-            mock_session.get = Mock(return_value=mock_response)
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session.get.return_value = mock_response
             
             # Mock TCPConnector to prevent initialization issues
             mock_connector = AsyncMock()
